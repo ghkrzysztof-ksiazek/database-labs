@@ -1,0 +1,57 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: clickhouse
+  namespace: clickhouse
+  labels:
+    release: kps
+    app: clickhouse-lab
+spec:
+  namespaceSelector:
+    matchNames:
+      - clickhouse
+  selector:
+    matchLabels:
+      app: clickhouse-lab
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: clickhouse-keeper
+  namespace: clickhouse
+  labels:
+    release: kps
+    app: clickhouse-keeper
+spec:
+  namespaceSelector:
+    matchNames:
+      - clickhouse
+  selector:
+    matchLabels:
+      app: clickhouse-keeper
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: clickhouse-operator
+  namespace: clickhouse
+  labels:
+    release: kps
+spec:
+  namespaceSelector:
+    matchNames:
+      - clickhouse
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: altinity-clickhouse-operator
+  endpoints:
+    - interval: 30s
+      targetPort: 8888

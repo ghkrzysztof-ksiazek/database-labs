@@ -1,0 +1,20 @@
+---
+- name: Deploy localhost ClickHouse lab
+  hosts: localhost
+  gather_facts: true
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  pre_tasks:
+    - name: Load Slack secrets when present
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/group_vars/secrets.yml"
+      when: lookup('ansible.builtin.fileglob', playbook_dir + '/../inventory/group_vars/secrets.yml') | length > 0
+  roles:
+    - prereqs
+    - kind_cluster
+    - clickhouse_operator
+    - clickhouse_cluster
+    - monitoring

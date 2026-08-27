@@ -1,0 +1,70 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: clickhouse-lab
+  namespace: monitoring
+  labels:
+    release: kps
+    app: clickhouse-lab
+spec:
+  groups:
+    - name: clickhouse.availability
+      rules:
+        - alert: ClickHouseDown
+          expr: up{job="clickhouse-http"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: ClickHouse target is down
+            description: Prometheus cannot scrape ClickHouse metrics for {{ $labels.instance }}.
+
+        - alert: ClickHouseKeeperDown
+          expr: up{job="keeper-metrics"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: ClickHouse Keeper target is down
+            description: Prometheus cannot scrape Keeper metrics for {{ $labels.instance }}.
+
+        - alert: ClickHouseReplicaReadonly
+          expr: ClickHouseMetrics_ReadonlyReplica > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: ClickHouse replica is read-only
+            description: Replica {{ $labels.instance }} has ReadonlyReplica > 0 (Keeper or replication issue).
+
+        - alert: ClickHouseDelayedReplicas
+          expr: ClickHouseAsyncMetrics_ReplicasMaxAbsoluteDelay > 30
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: ClickHouse replica lag is high
+            description: Absolute replica delay is {{ $value }}s on {{ $labels.instance }}.
+
+        - alert: ClickHouseLowDisk
+          expr: |
+            (
+              ClickHouseAsyncMetrics_DiskAvailable_default
+              /
+              ClickHouseAsyncMetrics_DiskTotal_default
+            ) < 0.15
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: ClickHouse data disk is below 15% free
+            description: Instance {{ $labels.instance }} is running low on disk.
+
+        - alert: ClickHouseRejectedInserts
+          expr: increase(ClickHouseProfileEvents_RejectedInserts[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: ClickHouse is rejecting inserts
+            description: Inserts were rejected on {{ $labels.instance }} in the last 5 minutes.

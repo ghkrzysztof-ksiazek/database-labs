@@ -1,0 +1,70 @@
+---
+- name: Verify ClickHouse lab
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  tasks:
+    - name: Ensure kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig
+
+    - name: Fail if cluster was not created
+      ansible.builtin.assert:
+        that: kubeconfig.stat.exists
+        fail_msg: "Missing {{ kubeconfig_path }}. Run `make deploy` first."
+
+    - name: Wait for ClickHouse pods
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        kind: Pod
+        namespace: "{{ clickhouse_namespace }}"
+        label_selectors:
+          - clickhouse.altinity.com/chi={{ chi_name }}
+      register: ch_pods
+      until:
+        - ch_pods.resources | length >= 2
+        - ch_pods.resources | map(attribute='status.phase') | unique | list == ['Running']
+      retries: 30
+      delay: 10
+
+    - name: Query row count via HTTP
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ kind_host_http_port }}/?user={{ clickhouse_user }}&password={{ clickhouse_password }}"
+        method: POST
+        body: "SELECT count() FROM nyc.trips_dist"
+        return_content: true
+        status_code: [200]
+      register: count_query
+
+    - name: Require a loaded dataset
+      ansible.builtin.assert:
+        that:
+          - (count_query.content | trim | int) > 0
+        fail_msg: "nyc.trips_dist is empty. Run ./scripts/lab.sh load-data"
+
+    - name: Check Prometheus scrape of ClickHouse
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ kind_host_prometheus_port }}/api/v1/query?query=up%7Bjob%3D%22clickhouse-http%22%7D"
+        return_content: true
+      register: prom_up
+
+    - name: Require ClickHouse Prometheus targets up
+      ansible.builtin.assert:
+        that:
+          - (prom_up.json.data.result | selectattr('value.1', 'equalto', '1') | list | length) >= 1
+        fail_msg: "Prometheus is not scraping job=clickhouse-http with up=1"
+
+    - name: Check Alertmanager
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ kind_host_alertmanager_port }}/-/ready"
+        return_content: true
+        status_code: [200]
+
+    - name: Show verification result
+      ansible.builtin.debug:
+        msg: "ClickHouse rows={{ count_query.content | trim }}; Prometheus and Alertmanager are up."

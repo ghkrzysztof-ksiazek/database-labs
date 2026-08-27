@@ -1,0 +1,39 @@
+flowchart TB
+  subgraph laptop [Your laptop]
+    A[Ansible playbooks]
+    D[Docker]
+    H[Host ports 8123 / 9000 / 3000 / 9090 / 9093]
+  end
+
+  A -->|kind create cluster| D
+
+  subgraph kind [kind cluster: clickhouse-lab]
+    CP[control-plane]
+    W1[worker]
+    W2[worker]
+
+    subgraph ns_ch [namespace: clickhouse]
+      OP[Altinity operator]
+      K0[Keeper-0]
+      K1[Keeper-1]
+      K2[Keeper-2]
+      CH0[ClickHouse replica 0]
+      CH1[ClickHouse replica 1]
+    end
+
+    subgraph ns_mon [namespace: monitoring]
+      PROM[Prometheus]
+      AM[Alertmanager]
+      GRAF[Grafana]
+    end
+  end
+
+  CH0 --> K0
+  CH1 --> K0
+  CH0 -.-> CH1
+  PROM -->|scrape /metrics| CH0
+  PROM -->|scrape /metrics| CH1
+  PROM -->|scrape /metrics| K0
+  PROM --> AM
+  AM -->|Incoming Webhook when configured| SLACK[Slack channel]
+  H --> CP

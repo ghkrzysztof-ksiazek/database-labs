@@ -1,0 +1,74 @@
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: {{ chi_name }}
+  namespace: {{ clickhouse_namespace }}
+spec:
+  defaults:
+    templates:
+      podTemplate: clickhouse
+      dataVolumeClaimTemplate: data
+      serviceTemplate: ch-service
+  configuration:
+    users:
+      {{ clickhouse_user }}/password: {{ clickhouse_password }}
+      {{ clickhouse_user }}/networks/ip:
+        - 0.0.0.0/0
+      {{ clickhouse_user }}/profile: default
+      {{ clickhouse_user }}/quota: default
+    settings:
+      prometheus/endpoint: /metrics
+      prometheus/port: "9363"
+      prometheus/metrics: "true"
+      prometheus/events: "true"
+      prometheus/asynchronous_metrics: "true"
+      prometheus/status_info: "true"
+    files:
+      config.d/listen.xml: |
+        <clickhouse>
+          <listen_host>0.0.0.0</listen_host>
+        </clickhouse>
+    zookeeper:
+      nodes:
+        - host: keeper-{{ chk_name }}
+          port: 2181
+    clusters:
+      - name: {{ cluster_name }}
+        secret:
+          auto: "True"
+        layout:
+          shardsCount: 1
+          replicasCount: 2
+  templates:
+    serviceTemplates:
+      - name: ch-service
+        spec:
+          ports:
+            - name: http
+              port: 8123
+            - name: tcp
+              port: 9000
+            - name: metrics
+              port: 9363
+    podTemplates:
+      - name: clickhouse
+        spec:
+          containers:
+            - name: clickhouse
+              image: {{ clickhouse_image }}
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+    volumeClaimTemplates:
+      - name: data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi

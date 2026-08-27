@@ -1,0 +1,59 @@
+---
+- name: Fire a test alert into Alertmanager
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  tasks:
+    - name: Detect whether Slack is configured on Alertmanager
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - -n
+          - "{{ monitoring_namespace }}"
+          - get
+          - secret
+          - alertmanager-kps-kube-prometheus-stack-alertmanager
+          - -o
+          - jsonpath={.data.alertmanager\.yaml}
+      register: am_secret
+      changed_when: false
+      failed_when: false
+
+    - name: Decode Alertmanager config
+      ansible.builtin.set_fact:
+        am_config: "{{ (am_secret.stdout | b64decode) if am_secret.rc == 0 and am_secret.stdout | length > 0 else '' }}"
+
+    - name: Post synthetic firing alert
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ kind_host_alertmanager_port }}/api/v2/alerts"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json
+        body:
+          - labels:
+              alertname: ClickHouseLabTestAlert
+              severity: warning
+              namespace: "{{ clickhouse_namespace }}"
+            annotations:
+              summary: Synthetic lab alert
+              description: Posted by ansible/playbooks/test-alert.yml to verify Slack routing.
+            startsAt: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        status_code: [200]
+      register: am
+
+    - name: Show Alertmanager response
+      ansible.builtin.debug:
+        msg: >-
+          Alertmanager accepted ClickHouseLabTestAlert (HTTP {{ am.status }}).
+          {{
+            'Slack webhook is present in Alertmanager config; check the Slack channel after ~30s.'
+            if ('slack_api_url' in am_config)
+            else 'Slack webhook is NOT configured yet. Add secrets.yml (see docs/slack-setup.md) then run ./scripts/lab.sh configure-slack.'
+          }}

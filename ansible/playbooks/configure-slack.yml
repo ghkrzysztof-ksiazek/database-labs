@@ -1,0 +1,25 @@
+---
+- name: Refresh ClickHouse monitoring manifests
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  pre_tasks:
+    - name: Load Slack secrets when present
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/group_vars/secrets.yml"
+      when: lookup('ansible.builtin.fileglob', playbook_dir + '/../inventory/group_vars/secrets.yml') | length > 0
+    - name: Require a Slack Incoming Webhook
+      ansible.builtin.assert:
+        that:
+          - slack_webhook_url is defined
+          - slack_webhook_url is match('^https://hooks\\.slack\\.com/services/.+')
+        fail_msg: >-
+          Copy ansible/inventory/group_vars/secrets.yml.example to secrets.yml
+          and set slack_webhook_url (https://hooks.slack.com/services/...).
+          Create the webhook at https://api.slack.com/apps → Incoming Webhooks.
+  roles:
+    - monitoring

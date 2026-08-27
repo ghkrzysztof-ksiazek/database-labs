@@ -1,0 +1,80 @@
+---
+- name: Copy load SQL into the cluster ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: nyc-taxi-load
+        namespace: "{{ clickhouse_namespace }}"
+      data:
+        load.sql: "{{ lookup('template', 'load.sql.j2') }}"
+
+- name: Delete previous load job if present
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ clickhouse_namespace }}"
+    name: nyc-taxi-load
+    wait: true
+    wait_timeout: 60
+
+- name: Run NYC taxi load job
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: nyc-taxi-load
+        namespace: "{{ clickhouse_namespace }}"
+      spec:
+        backoffLimit: 1
+        template:
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: loader
+                image: "{{ clickhouse_image }}"
+                imagePullPolicy: IfNotPresent
+                command: ["clickhouse-client"]
+                args:
+                  - "--host=clickhouse-native"
+                  - "--port=9000"
+                  - "--user={{ clickhouse_user }}"
+                  - "--password={{ clickhouse_password }}"
+                  - "--multiquery"
+                  - "--queries-file=/sql/load.sql"
+                volumeMounts:
+                  - name: sql
+                    mountPath: /sql
+            volumes:
+              - name: sql
+                configMap:
+                  name: nyc-taxi-load
+
+- name: Wait for load job to complete
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ clickhouse_namespace }}"
+    name: nyc-taxi-load
+  register: job
+  until:
+    - job.resources | length == 1
+    - job.resources[0].status.succeeded | default(0) | int == 1
+      or (job.resources[0].status.failed | default(0) | int) > 0
+  retries: 60
+  delay: 15
+
+- name: Fail if load job did not succeed
+  ansible.builtin.assert:
+    that:
+      - job.resources[0].status.succeeded | default(0) | int == 1
+    fail_msg: "nyc-taxi-load job failed. Inspect logs with kubectl logs -n {{ clickhouse_namespace }} job/nyc-taxi-load"

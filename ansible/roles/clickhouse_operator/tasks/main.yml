@@ -1,0 +1,27 @@
+---
+- name: Ensure ClickHouse namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ clickhouse_namespace }}"
+
+- name: Add Altinity Helm repo
+  kubernetes.core.helm_repository:
+    name: altinity
+    repo_url: https://helm.altinity.com
+    force_update: true
+
+- name: Install Altinity ClickHouse operator
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: clickhouse-operator
+    chart_ref: altinity/altinity-clickhouse-operator
+    chart_version: "{{ altinity_chart_version }}"
+    release_namespace: "{{ clickhouse_namespace }}"
+    create_namespace: true
+    wait: true
+    wait_timeout: "5m0s"

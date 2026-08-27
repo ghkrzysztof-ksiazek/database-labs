@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-http
+  namespace: {{ clickhouse_namespace }}
+  labels:
+    app: clickhouse-lab
+spec:
+  type: NodePort
+  selector:
+    clickhouse.altinity.com/chi: {{ chi_name }}
+    clickhouse.altinity.com/ready: "yes"
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+      nodePort: 30081
+    - name: metrics
+      port: 9363
+      targetPort: 9363
+      nodePort: 30363
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-native
+  namespace: {{ clickhouse_namespace }}
+  labels:
+    app: clickhouse-lab-native
+spec:
+  type: NodePort
+  selector:
+    clickhouse.altinity.com/chi: {{ chi_name }}
+    clickhouse.altinity.com/ready: "yes"
+  ports:
+    - name: tcp
+      port: 9000
+      targetPort: 9000
+      nodePort: 30090

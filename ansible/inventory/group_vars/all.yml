@@ -1,0 +1,35 @@
+---
+repo_root: "{{ (playbook_dir ~ '/../..') | realpath }}"
+kubeconfig_path: "{{ repo_root }}/.kube/config"
+kind_cluster_name: clickhouse-lab
+
+clickhouse_namespace: clickhouse
+monitoring_namespace: monitoring
+
+altinity_chart_version: "0.27.3"
+clickhouse_image: "clickhouse/clickhouse-server:25.8"
+keeper_image: "clickhouse/clickhouse-keeper:25.8"
+
+chi_name: lab
+chk_name: lab
+cluster_name: lab
+
+clickhouse_user: default
+clickhouse_password: clickhouse
+
+# Public NYC Taxi sample: ~1M rows in trips_0.gz (ClickHouse documentation bucket).
+nyc_taxi_url: "https://datasets-documentation.s3.eu-west-3.amazonaws.com/nyc-taxi/trips_0.gz"
+
+kube_prometheus_chart_version: "88.5.2"
+
+grafana_admin_password: admin
+
+# Overridden by ansible/inventory/group_vars/secrets.yml when present.
+slack_webhook_url: ""
+slack_channel: "#clickhouse-lab-alerts"
+
+kind_host_http_port: 8123
+kind_host_native_port: 9000
+kind_host_grafana_port: 3000
+kind_host_prometheus_port: 9090
+kind_host_alertmanager_port: 9093

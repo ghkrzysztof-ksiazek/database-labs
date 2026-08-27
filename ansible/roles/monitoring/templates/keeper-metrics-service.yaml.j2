@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: keeper-metrics
+  namespace: {{ clickhouse_namespace }}
+  labels:
+    app: clickhouse-keeper
+    release: kps
+spec:
+  ports:
+    - name: metrics
+      port: 7000
+      targetPort: 7000
+  selector:
+    clickhouse-keeper.altinity.com/chk: {{ chk_name }}

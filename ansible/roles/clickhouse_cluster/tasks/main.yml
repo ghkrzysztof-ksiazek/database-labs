@@ -1,0 +1,64 @@
+---
+- name: Render ClickHouse Keeper manifest
+  ansible.builtin.template:
+    src: keeper.yaml.j2
+    dest: "{{ repo_root }}/k8s/clickhouse/keeper.yaml"
+    mode: "0644"
+
+- name: Render ClickHouseInstallation manifest
+  ansible.builtin.template:
+    src: chi.yaml.j2
+    dest: "{{ repo_root }}/k8s/clickhouse/cluster.yaml"
+    mode: "0644"
+
+- name: Render NodePort services
+  ansible.builtin.template:
+    src: nodeports.yaml.j2
+    dest: "{{ repo_root }}/k8s/clickhouse/nodeports.yaml"
+    mode: "0644"
+
+- name: Apply ClickHouse Keeper
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/clickhouse/keeper.yaml"
+
+- name: Wait for Keeper pods
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ clickhouse_namespace }}"
+    label_selectors:
+      - clickhouse-keeper.altinity.com/chk={{ chk_name }}
+  register: keeper_pods
+  until:
+    - keeper_pods.resources | length >= 3
+    - keeper_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+  retries: 60
+  delay: 10
+
+- name: Apply ClickHouse cluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/clickhouse/cluster.yaml"
+
+- name: Wait for ClickHouseInstallation to become Completed
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: clickhouse.altinity.com/v1
+    kind: ClickHouseInstallation
+    namespace: "{{ clickhouse_namespace }}"
+    name: "{{ chi_name }}"
+  register: chi
+  until:
+    - chi.resources | length == 1
+    - chi.resources[0].status.status | default('') in ['Completed', 'Running']
+  retries: 90
+  delay: 10
+
+- name: Apply NodePort services
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/clickhouse/nodeports.yaml"

@@ -1,0 +1,23 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: {{ kind_cluster_name }}
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30081
+        hostPort: {{ kind_host_http_port }}
+        protocol: TCP
+      - containerPort: 30090
+        hostPort: {{ kind_host_native_port }}
+        protocol: TCP
+      - containerPort: 30300
+        hostPort: {{ kind_host_grafana_port }}
+        protocol: TCP
+      - containerPort: 30091
+        hostPort: {{ kind_host_prometheus_port }}
+        protocol: TCP
+      - containerPort: 30093
+        hostPort: {{ kind_host_alertmanager_port }}
+        protocol: TCP
+  - role: worker
+  - role: worker

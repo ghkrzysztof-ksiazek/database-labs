@@ -1,0 +1,16 @@
+sequenceDiagram
+  participant CH as ClickHouse :9363/metrics
+  participant P as Prometheus
+  participant R as PrometheusRule
+  participant AM as Alertmanager
+  participant S as Slack Incoming Webhook
+
+  loop every 15s
+    P->>CH: GET /metrics
+    CH-->>P: ClickHouseMetrics_* / ClickHouseAsyncMetrics_*
+  end
+  P->>R: evaluate ClickHouseDown, lag, disk, ...
+  R-->>AM: firing alert (grouped)
+  Note over AM: group_wait 30s
+  AM->>S: POST JSON payload
+  S-->>AM: 200 OK

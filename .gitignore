@@ -1,0 +1,11 @@
+.venv/
+.kube/
+ansible/collections/
+ansible/inventory/group_vars/secrets.yml
+ansible/group_vars/secrets.yml
+k8s/monitoring/kube-prometheus-values.yaml
+ansible/group_vars/secrets.yml
+__pycache__/
+*.pyc
+.DS_Store
+*.retry

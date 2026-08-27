@@ -1,0 +1,55 @@
+apiVersion: clickhouse-keeper.altinity.com/v1
+kind: ClickHouseKeeperInstallation
+metadata:
+  name: {{ chk_name }}
+  namespace: {{ clickhouse_namespace }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "7000"
+spec:
+  defaults:
+    templates:
+      podTemplate: keeper
+      dataVolumeClaimTemplate: data
+  configuration:
+    clusters:
+      - name: cluster1
+        layout:
+          replicasCount: 3
+    settings:
+      logger/level: information
+      logger/console: "true"
+      listen_host: "0.0.0.0"
+      keeper_server/tcp_port: "2181"
+      prometheus/endpoint: /metrics
+      prometheus/port: "7000"
+      prometheus/metrics: "true"
+      prometheus/events: "true"
+      prometheus/asynchronous_metrics: "true"
+  templates:
+    podTemplates:
+      - name: keeper
+        metadata:
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "7000"
+        spec:
+          containers:
+            - name: clickhouse-keeper
+              image: {{ keeper_image }}
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 384Mi
+    volumeClaimTemplates:
+      - name: data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi

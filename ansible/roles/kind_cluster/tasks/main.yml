@@ -1,0 +1,39 @@
+---
+- name: Ensure kubeconfig directory exists
+  ansible.builtin.file:
+    path: "{{ kubeconfig_path | dirname }}"
+    state: directory
+    mode: "0700"
+
+- name: Render kind cluster config
+  ansible.builtin.template:
+    src: kind-config.yaml.j2
+    dest: "{{ repo_root }}/k8s/kind-config.yaml"
+    mode: "0644"
+
+- name: Check whether kind cluster exists
+  ansible.builtin.command: kind get clusters
+  register: kind_clusters
+  changed_when: false
+
+- name: Create kind cluster
+  ansible.builtin.command: >-
+    kind create cluster
+    --name {{ kind_cluster_name }}
+    --config {{ repo_root }}/k8s/kind-config.yaml
+    --kubeconfig {{ kubeconfig_path }}
+  when: kind_cluster_name not in kind_clusters.stdout_lines
+  timeout: 600
+
+- name: Export kubeconfig if cluster already existed
+  ansible.builtin.command: >-
+    kind export kubeconfig
+    --name {{ kind_cluster_name }}
+    --kubeconfig {{ kubeconfig_path }}
+  changed_when: false
+
+- name: Wait for Kubernetes nodes to be Ready
+  ansible.builtin.command: >-
+    kubectl wait --for=condition=Ready nodes --all --timeout=180s
+    --kubeconfig {{ kubeconfig_path }}
+  changed_when: false
