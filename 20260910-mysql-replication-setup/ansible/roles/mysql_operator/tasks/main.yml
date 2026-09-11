@@ -1,0 +1,49 @@
+---
+- name: Ensure MySQL namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ mysql_namespace }}"
+
+- name: Add Percona Helm repo
+  kubernetes.core.helm_repository:
+    name: percona
+    repo_url: https://percona.github.io/percona-helm-charts/
+    force_update: true
+
+- name: Install Percona Server for MySQL operator
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: ps-operator
+    chart_ref: percona/ps-operator
+    chart_version: "{{ ps_operator_chart_version }}"
+    release_namespace: "{{ mysql_namespace }}"
+    create_namespace: true
+    wait: true
+    wait_timeout: "5m0s"
+
+- name: Wait for operator deployment
+  ansible.builtin.command: >-
+    kubectl -n {{ mysql_namespace }} rollout status
+    deploy/ps-operator --timeout=180s
+    --kubeconfig {{ kubeconfig_path }}
+  changed_when: false
+  register: operator_rollout
+  failed_when: false
+
+- name: Wait for any percona mysql operator pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/name=ps-operator
+  register: op_pods
+  until: op_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length >= 1
+  retries: 30
+  delay: 5
+  when: operator_rollout.rc | default(1) != 0

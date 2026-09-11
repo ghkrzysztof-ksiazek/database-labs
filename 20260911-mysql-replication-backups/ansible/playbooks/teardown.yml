@@ -1,0 +1,21 @@
+---
+- name: Tear down the kind MySQL lab cluster
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  tasks:
+    - name: Delete kind cluster
+      ansible.builtin.command:
+        cmd: "kind delete cluster --name {{ kind_cluster_name }}"
+      register: kind_delete
+      changed_when: kind_delete.rc == 0
+      failed_when: false
+
+    - name: Remove project kubeconfig
+      ansible.builtin.file:
+        path: "{{ kubeconfig_path }}"
+        state: absent

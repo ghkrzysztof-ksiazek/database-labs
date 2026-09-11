@@ -1,0 +1,17 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: mysql-lab
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30306
+        hostPort: 3307
+        protocol: TCP
+      - containerPort: 30300
+        hostPort: 3001
+        protocol: TCP
+      - containerPort: 30091
+        hostPort: 9091
+        protocol: TCP
+  - role: worker
+  - role: worker

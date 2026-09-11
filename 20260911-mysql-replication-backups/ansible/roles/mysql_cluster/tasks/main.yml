@@ -1,0 +1,66 @@
+---
+- name: Render MySQL user secret
+  ansible.builtin.template:
+    src: secrets.yaml.j2
+    dest: "{{ repo_root }}/k8s/mysql/secrets.yaml"
+    mode: "0600"
+
+- name: Apply MySQL user secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/mysql/secrets.yaml"
+
+- name: Render PerconaServerMySQL cluster
+  ansible.builtin.template:
+    src: cluster.yaml.j2
+    dest: "{{ repo_root }}/k8s/mysql/cluster.yaml"
+    mode: "0644"
+
+- name: Render NodePort and metrics services
+  ansible.builtin.template:
+    src: nodeports.yaml.j2
+    dest: "{{ repo_root }}/k8s/mysql/nodeports.yaml"
+    mode: "0644"
+
+- name: Apply MySQL cluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/mysql/cluster.yaml"
+
+- name: Apply NodePort and metrics services
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/mysql/nodeports.yaml"
+
+- name: Wait for MySQL pods to be Running
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/instance={{ mysql_cluster_name }}
+      - app.kubernetes.io/component=database
+  register: mysql_pods
+  until:
+    - mysql_pods.resources | length >= mysql_size | int
+    - mysql_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+  retries: 90
+  delay: 10
+
+- name: Wait for PerconaServerMySQL to become ready
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: ps.percona.com/v1
+    kind: PerconaServerMySQL
+    namespace: "{{ mysql_namespace }}"
+    name: "{{ mysql_cluster_name }}"
+  register: ps
+  until:
+    - ps.resources | length == 1
+    - (ps.resources[0].status.state | default('')) in ['ready', 'Ready']
+      or (ps.resources[0].status.mysql.state | default('')) in ['ready', 'Ready']
+  retries: 90
+  delay: 10

@@ -1,0 +1,137 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQL
+metadata:
+  name: lab
+  namespace: mysql
+  finalizers:
+    - percona.com/delete-mysql-pods-in-order
+spec:
+  crVersion: "1.2.0"
+  secretsName: lab-secrets
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    versionServiceEndpoint: https://check.percona.com
+  unsafeFlags:
+    mysqlSize: true
+    orchestratorSize: true
+    proxySize: true
+  mysql:
+    clusterType: async
+    autoRecovery: true
+    size: 2
+    image: percona/percona-server:8.4.10-10.1
+    imagePullPolicy: IfNotPresent
+    gracePeriod: 30
+    podDisruptionBudget:
+      maxUnavailable: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1536Mi
+    affinity:
+      antiAffinityTopologyKey: "none"
+    exposePrimary:
+      enabled: true
+      type: ClusterIP
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 5Gi
+    configuration: |
+      [mysqld]
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      log_bin=ON
+      binlog_format=ROW
+      binlog_expire_logs_seconds=86400
+      innodb_buffer_pool_size=256M
+      max_connections=80
+      skip_name_resolve
+    sidecars:
+      - name: exporter
+        image: prom/mysqld-exporter:v0.16.0
+        imagePullPolicy: IfNotPresent
+        args:
+          - --mysqld.address=127.0.0.1:3306
+          - --mysqld.username=monitor
+          - --collect.info_schema.innodb_metrics
+          - --collect.info_schema.tables
+          - --collect.global_status
+          - --collect.global_variables
+          - --collect.slave_status
+        env:
+          - name: MYSQLD_EXPORTER_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: lab-secrets
+                key: monitor
+        ports:
+          - name: metrics
+            containerPort: 9104
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            memory: 64Mi
+  proxy:
+    haproxy:
+      enabled: true
+      size: 1
+      image: percona/haproxy:2.8.18-1
+      imagePullPolicy: IfNotPresent
+      gracePeriod: 30
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        type: ClusterIP
+    router:
+      enabled: false
+      size: 1
+      image: percona/percona-mysql-router:8.4.10
+  orchestrator:
+    enabled: true
+    size: 1
+    image: percona/percona-orchestrator:3.2.6-22
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        memory: 128M
+      limits:
+        memory: 256M
+    affinity:
+      antiAffinityTopologyKey: "none"
+    configuration: '{"InstancePollSeconds": 2, "RecoveryPeriodBlockSeconds": 15}'
+  backup:
+    enabled: true
+    image: percona/percona-xtrabackup:8.4.0-6.1
+    imagePullPolicy: IfNotPresent
+    schedule:
+      - name: hourly-full
+        schedule: "15 * * * *"
+        keep: 3
+        storageName: minio
+        type: full
+    storages:
+      minio:
+        type: s3
+        verifyTLS: false
+        s3:
+          bucket: mysql-lab-backups
+          credentialsSecret: minio-backup-credentials
+          endpointUrl: http://minio.mysql.svc.cluster.local:9000
+          region: us-east-1
+          prefix: lab
+  toolkit:
+    image: percona/percona-toolkit:3.7.1-4
+    imagePullPolicy: IfNotPresent

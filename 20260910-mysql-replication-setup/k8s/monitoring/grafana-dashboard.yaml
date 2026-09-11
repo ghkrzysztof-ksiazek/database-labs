@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-mysql-lab
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  mysql-lab.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "id": 1,
+          "title": "mysqld scrape (up)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+          "targets": [{ "expr": "up{job=\"mysql\"}", "refId": "A" }],
+          "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": 0 }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+        },
+        {
+          "id": 2,
+          "title": "MySQL up (mysqld_up)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+          "targets": [{ "expr": "mysql_up", "refId": "A" }],
+          "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": 0 }, { "color": "green", "value": 1 }] } }, "overrides": [] }
+        },
+        {
+          "id": 3,
+          "title": "Replica IO running",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+          "targets": [{ "expr": "mysql_slave_status_slave_io_running", "refId": "A" }]
+        },
+        {
+          "id": 4,
+          "title": "Questions",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "targets": [{ "expr": "rate(mysql_global_status_questions[1m])", "legendFormat": "{{ instance }}", "refId": "A" }]
+        },
+        {
+          "id": 5,
+          "title": "Replica lag (seconds)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "targets": [{ "expr": "mysql_slave_status_seconds_behind_master", "legendFormat": "{{ instance }}", "refId": "A" }]
+        }
+      ],
+      "refresh": "10s",
+      "schemaVersion": 39,
+      "tags": ["mysql", "mysqld", "lab"],
+      "templating": { "list": [] },
+      "time": { "from": "now-15m", "to": "now" },
+      "timezone": "browser",
+      "title": "MySQL replication lab",
+      "uid": "mysql-lab",
+      "version": 1
+    }

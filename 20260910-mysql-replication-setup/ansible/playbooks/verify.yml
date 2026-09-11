@@ -1,0 +1,14 @@
+---
+# Live checks against the running cluster: replica IO/SQL, sysbench 10 tables
+# around 500MB, and Prometheus mysqld scrape up==1.
+- name: Verify MySQL replication lab
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+    expected_sysbench_tables: 10
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../..') | realpath }}/.kube/config"
+  roles:
+    - verify_cluster

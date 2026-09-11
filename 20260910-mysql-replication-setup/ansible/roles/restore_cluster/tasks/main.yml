@@ -1,0 +1,132 @@
+---
+- name: Find the current writable source
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_path }}"
+    NS="{{ mysql_namespace }}"
+    pods=$(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    for p in $pods; do
+      ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+      if [ "$ro" = "0" ]; then
+        echo "$p"
+        exit 0
+      fi
+    done
+    exit 1
+  args:
+    executable: /bin/bash
+  register: src
+  changed_when: false
+
+- name: Create a canary table that must disappear after restore
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ src.stdout | trim }}"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -N -e "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.canary_after_backup
+      (id INT PRIMARY KEY, note VARCHAR(64));
+      INSERT INTO {{ sysbench_database }}.canary_after_backup VALUES (1, 'post-backup canary')
+      ON DUPLICATE KEY UPDATE note=VALUES(note)"
+
+- name: Confirm canary exists before restore
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ src.stdout | trim }}"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema='{{ sysbench_database }}' AND table_name='canary_after_backup'"
+  register: canary_before
+
+- name: Require canary before restore
+  ansible.builtin.assert:
+    that:
+      - (canary_before.stdout_lines | select('match', '^[0-9]+$') | first | int) == 1
+
+- name: Delete previous restore object if present
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: absent
+    api_version: ps.percona.com/v1
+    kind: PerconaServerMySQLRestore
+    namespace: "{{ mysql_namespace }}"
+    name: lab-restore
+    wait: true
+    wait_timeout: 120
+
+- name: Render restore manifest
+  ansible.builtin.template:
+    src: restore.yaml.j2
+    dest: "{{ repo_root }}/k8s/backup/restore.yaml"
+    mode: "0644"
+
+- name: Apply whole-cluster restore
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/backup/restore.yaml"
+
+- name: Wait for restore to succeed
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: ps.percona.com/v1
+    kind: PerconaServerMySQLRestore
+    namespace: "{{ mysql_namespace }}"
+    name: lab-restore
+  register: rst
+  until:
+    - rst.resources | length == 1
+    - (rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done', 'failed', 'error']
+  retries: 120
+  delay: 15
+
+- name: Require restore success
+  ansible.builtin.assert:
+    that:
+      - (rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+    fail_msg: "Restore did not succeed: {{ rst.resources[0].status | default({}) }}"
+
+- name: Wait for MySQL pods after restore
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/instance={{ mysql_cluster_name }}
+      - app.kubernetes.io/component=database
+  register: mysql_pods
+  until:
+    - mysql_pods.resources | length >= 2
+    - mysql_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+  retries: 90
+  delay: 10
+
+- name: Measure restored sysbench dataset
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ mysql_cluster_name }}-mysql-0"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+      SELECT IFNULL(ROUND(SUM(data_length+index_length)/1024/1024),0)
+      FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}';
+      SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema='{{ sysbench_database }}' AND table_name='canary_after_backup'"
+  register: restored
+  retries: 20
+  delay: 6
+  until: restored.rc == 0
+
+- name: Require restored cluster has 10 sysbench tables and no canary
+  ansible.builtin.assert:
+    that:
+      - (restored.stdout_lines | select('match', '^[0-9]+$') | list | first | int) == (sysbench_tables | int)
+      - (restored.stdout_lines | select('match', '^[0-9]+$') | list | last | int) == 0
+      - (restored.stdout_lines | select('match', '^[0-9]+$') | list)[1] | int >= (data_size_min_mb | int)
+    fail_msg: "Restore did not bring back sysbench data. Output={{ restored.stdout }}"

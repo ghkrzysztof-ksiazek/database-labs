@@ -1,0 +1,17 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: {{ kind_cluster_name }}
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: {{ kind_nodeport_mysql }}
+        hostPort: {{ kind_host_mysql_port }}
+        protocol: TCP
+      - containerPort: {{ kind_nodeport_grafana }}
+        hostPort: {{ kind_host_grafana_port }}
+        protocol: TCP
+      - containerPort: {{ kind_nodeport_prometheus }}
+        hostPort: {{ kind_host_prometheus_port }}
+        protocol: TCP
+  - role: worker
+  - role: worker

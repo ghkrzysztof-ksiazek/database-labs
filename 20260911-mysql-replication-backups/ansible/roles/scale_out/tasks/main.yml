@@ -1,0 +1,83 @@
+---
+- name: Read current MySQL size
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: ps.percona.com/v1
+    kind: PerconaServerMySQL
+    namespace: "{{ mysql_namespace }}"
+    name: "{{ mysql_cluster_name }}"
+  register: ps
+
+- name: Patch cluster to add a replica
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig
+      - "{{ kubeconfig_path }}"
+      - -n
+      - "{{ mysql_namespace }}"
+      - patch
+      - ps
+      - "{{ mysql_cluster_name }}"
+      - --type
+      - json
+      - -p
+      - '[{"op":"replace","path":"/spec/mysql/size","value":{{ mysql_scale_out_size | int }}}]'
+
+- name: Wait for scaled replica pods
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/instance={{ mysql_cluster_name }}
+      - app.kubernetes.io/component=database
+  register: mysql_pods
+  until:
+    - mysql_pods.resources | length >= (mysql_scale_out_size | int)
+    - mysql_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+  retries: 90
+  delay: 10
+
+- name: Confirm the new replica is replicating sysbench data
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_path }}"
+    NS="{{ mysql_namespace }}"
+    DB="{{ sysbench_database }}"
+    expect={{ mysql_scale_out_size }}
+    pods=$(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    count=$(echo "$pods" | grep -c . || true)
+    echo "MYSQL_PODS=$count"
+    echo "$pods"
+    replica_ok=0
+    for p in $pods; do
+      ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" | tr -d '\r')
+      tables=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB' AND table_name LIKE 'sbtest%'" | tr -d '\r')
+      echo "POD $p read_only=$ro tables=$tables"
+      if [ "$ro" = "1" ]; then
+        io=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT SERVICE_STATE FROM performance_schema.replication_connection_status LIMIT 1" | tr -d '\r')
+        sql=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT SERVICE_STATE FROM performance_schema.replication_applier_status LIMIT 1" | tr -d '\r')
+        echo "POD $p replica_io=$io replica_sql=$sql"
+        if [ "$io" = "ON" ] && [ "$sql" = "ON" ] && [ "$tables" = "{{ sysbench_tables }}" ]; then
+          replica_ok=$((replica_ok+1))
+        fi
+      fi
+    done
+    echo "REPLICA_OK=$replica_ok"
+    test "$count" -ge "$expect"
+    test "$replica_ok" -ge 2
+  args:
+    executable: /bin/bash
+  register: scaled
+  retries: 30
+  delay: 10
+  until: scaled.rc == 0
+
+- name: Show scale-out result
+  ansible.builtin.debug:
+    var: scaled.stdout_lines

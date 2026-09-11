@@ -1,0 +1,24 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mysql
+  namespace: mysql
+  labels:
+    release: kps
+    app: mysql-lab
+spec:
+  namespaceSelector:
+    matchNames:
+      - mysql
+  selector:
+    matchLabels:
+      app: mysql-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      honorLabels: true
+      relabelings:
+        - action: replace
+          targetLabel: job
+          replacement: mysql

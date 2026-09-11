@@ -1,0 +1,8 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: lab-restore
+  namespace: mysql
+spec:
+  clusterName: lab
+  backupName: lab-ondemand

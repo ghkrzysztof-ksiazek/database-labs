@@ -32,6 +32,60 @@
     --kubeconfig {{ kubeconfig_path }}
   changed_when: false
 
+- name: List kind node containers
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - -aq
+      - --filter
+      - "label=io.x-k8s.kind.cluster={{ kind_cluster_name }}"
+  register: kind_node_ids
+  changed_when: false
+
+- name: List stopped kind node containers
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - -aq
+      - --filter
+      - "label=io.x-k8s.kind.cluster={{ kind_cluster_name }}"
+      - --filter
+      - status=exited
+  register: kind_stopped_node_ids
+  changed_when: false
+
+- name: Inspect kind node restart policies
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - --format
+      - "{% raw %}{{.HostConfig.RestartPolicy.Name}}{% endraw %}"
+      - "{{ item }}"
+  loop: "{{ kind_node_ids.stdout_lines }}"
+  register: kind_restart_inspect
+  changed_when: false
+
+# kind defaults to --restart=on-failure:1, which starts nodes again when
+# Docker comes up after an unclean stop (exit 137). Keep them stopped until
+# an explicit deploy or docker start.
+- name: Disable Docker auto-start of kind node containers
+  ansible.builtin.command:
+    argv:
+      - docker
+      - update
+      - --restart=no
+      - "{{ item.item }}"
+  loop: "{{ kind_restart_inspect.results }}"
+  when: item.stdout != "no"
+
+- name: Start stopped kind node containers
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'start'] + kind_stopped_node_ids.stdout_lines }}"
+  when: kind_stopped_node_ids.stdout_lines | length > 0
+
 - name: Wait for Kubernetes nodes to be Ready
   ansible.builtin.command: >-
     kubectl wait --for=condition=Ready nodes --all --timeout=180s

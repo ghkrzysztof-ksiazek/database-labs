@@ -1,0 +1,137 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQL
+metadata:
+  name: {{ mysql_cluster_name }}
+  namespace: {{ mysql_namespace }}
+  finalizers:
+    - percona.com/delete-mysql-pods-in-order
+spec:
+  crVersion: "{{ ps_cr_version }}"
+  secretsName: {{ mysql_secrets_name }}
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    versionServiceEndpoint: https://check.percona.com
+  unsafeFlags:
+    mysqlSize: true
+    orchestratorSize: true
+    proxySize: true
+  mysql:
+    clusterType: {{ mysql_cluster_type }}
+    autoRecovery: true
+    size: {{ mysql_size }}
+    image: {{ mysql_image }}
+    imagePullPolicy: IfNotPresent
+    gracePeriod: 30
+    podDisruptionBudget:
+      maxUnavailable: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1536Mi
+    affinity:
+      antiAffinityTopologyKey: "none"
+    exposePrimary:
+      enabled: true
+      type: ClusterIP
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 5Gi
+    configuration: |
+      [mysqld]
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      log_bin=ON
+      binlog_format=ROW
+      binlog_expire_logs_seconds=86400
+      innodb_buffer_pool_size=256M
+      max_connections=80
+      skip_name_resolve
+    sidecars:
+      - name: exporter
+        image: {{ mysqld_exporter_image }}
+        imagePullPolicy: IfNotPresent
+        args:
+          - --mysqld.address=127.0.0.1:3306
+          - --mysqld.username=monitor
+          - --collect.info_schema.innodb_metrics
+          - --collect.info_schema.tables
+          - --collect.global_status
+          - --collect.global_variables
+          - --collect.slave_status
+        env:
+          - name: MYSQLD_EXPORTER_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ mysql_secrets_name }}
+                key: monitor
+        ports:
+          - name: metrics
+            containerPort: 9104
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            memory: 64Mi
+  proxy:
+    haproxy:
+      enabled: true
+      size: 1
+      image: {{ haproxy_image }}
+      imagePullPolicy: IfNotPresent
+      gracePeriod: 30
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+      affinity:
+        antiAffinityTopologyKey: "none"
+      expose:
+        type: ClusterIP
+    router:
+      enabled: false
+      size: 1
+      image: percona/percona-mysql-router:8.4.10
+  orchestrator:
+    enabled: {{ 'true' if orchestrator_enabled else 'false' }}
+    size: 1
+    image: {{ orchestrator_image }}
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        memory: 128M
+      limits:
+        memory: 256M
+    affinity:
+      antiAffinityTopologyKey: "none"
+    configuration: '{"InstancePollSeconds": 2, "RecoveryPeriodBlockSeconds": 15}'
+  backup:
+    enabled: true
+    image: {{ xtrabackup_image }}
+    imagePullPolicy: IfNotPresent
+    schedule:
+      - name: hourly-full
+        schedule: "{{ backup_schedule }}"
+        keep: {{ backup_keep }}
+        storageName: {{ backup_storage_name }}
+        type: full
+    storages:
+      minio:
+        type: s3
+        verifyTLS: false
+        s3:
+          bucket: {{ backup_bucket }}
+          credentialsSecret: {{ minio_credentials_secret }}
+          endpointUrl: http://minio.{{ mysql_namespace }}.svc.cluster.local:9000
+          region: us-east-1
+          prefix: {{ mysql_cluster_name }}
+  toolkit:
+    image: {{ toolkit_image }}
+    imagePullPolicy: IfNotPresent

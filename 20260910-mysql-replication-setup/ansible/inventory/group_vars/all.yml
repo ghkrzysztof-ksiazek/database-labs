@@ -1,0 +1,54 @@
+---
+repo_root: "{{ (playbook_dir ~ '/../..') | realpath }}"
+kubeconfig_path: "{{ repo_root }}/.kube/config"
+kind_cluster_name: mysql-lab
+
+mysql_namespace: mysql
+monitoring_namespace: monitoring
+
+ps_operator_chart_version: "1.2.0"
+ps_cr_version: "1.2.0"
+mysql_cluster_name: lab
+mysql_cluster_type: async
+mysql_size: 2
+mysql_scale_out_size: 3
+orchestrator_enabled: true
+
+mysql_image: "percona/percona-server:8.4.10-10.1"
+haproxy_image: "percona/haproxy:2.8.18-1"
+orchestrator_image: "percona/percona-orchestrator:3.2.6-22"
+xtrabackup_image: "percona/percona-xtrabackup:8.4.0-6.1"
+toolkit_image: "percona/percona-toolkit:3.7.1-4"
+mysqld_exporter_image: "prom/mysqld-exporter:v0.16.0"
+sysbench_image: "ubuntu:24.04"
+minio_image: "minio/minio:RELEASE.2024-12-18T13-15-44Z"
+minio_mc_image: "minio/mc:RELEASE.2024-11-21T17-21-54Z"
+
+mysql_root_user: root
+mysql_root_password: mysql
+mysql_monitor_password: monitor
+mysql_secrets_name: lab-secrets
+
+sysbench_tables: 10
+sysbench_table_size: 200000
+sysbench_database: sbtest
+data_size_min_mb: 400
+data_size_max_mb: 700
+
+kube_prometheus_chart_version: "88.5.2"
+grafana_admin_password: admin
+
+kind_host_mysql_port: 3307
+kind_host_grafana_port: 3001
+kind_host_prometheus_port: 9091
+kind_nodeport_mysql: 30306
+kind_nodeport_grafana: 30300
+kind_nodeport_prometheus: 30091
+
+backup_storage_name: minio
+backup_bucket: mysql-lab-backups
+backup_schedule: "15 * * * *"
+backup_keep: 3
+minio_root_user: minio
+minio_root_password: minio12345
+minio_credentials_secret: minio-backup-credentials

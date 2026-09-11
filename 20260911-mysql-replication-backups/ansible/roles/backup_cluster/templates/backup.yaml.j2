@@ -1,0 +1,9 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  name: lab-ondemand
+  namespace: {{ mysql_namespace }}
+spec:
+  clusterName: {{ mysql_cluster_name }}
+  storageName: {{ backup_storage_name }}
+  type: full

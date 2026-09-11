@@ -1,0 +1,148 @@
+---
+- name: Wait until a writable MySQL primary answers
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ mysql_cluster_name }}-mysql-0"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT 1"
+  register: mysql_ping
+  until: mysql_ping.rc == 0
+  retries: 30
+  delay: 5
+
+- name: Recreate sysbench database on the source
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ mysql_cluster_name }}-mysql-0"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -e
+      "DROP DATABASE IF EXISTS {{ sysbench_database }};
+      CREATE DATABASE {{ sysbench_database }}"
+
+- name: Delete previous sysbench prepare job if present
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ mysql_namespace }}"
+    name: sysbench-prepare
+    wait: true
+    wait_timeout: 60
+
+- name: Run sysbench oltp prepare (10 tables, ~500MB)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: sysbench-prepare
+        namespace: "{{ mysql_namespace }}"
+      spec:
+        backoffLimit: 1
+        ttlSecondsAfterFinished: 86400
+        template:
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: sysbench
+                image: "{{ sysbench_image }}"
+                imagePullPolicy: IfNotPresent
+                env:
+                  - name: MYSQL_PWD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ mysql_secrets_name }}"
+                        key: root
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    set -euo pipefail
+                    export DEBIAN_FRONTEND=noninteractive
+                    apt-get update -qq
+                    apt-get install -y -qq sysbench mysql-client
+                    sysbench oltp_read_write \
+                      --db-driver=mysql \
+                      --mysql-host={{ mysql_cluster_name }}-haproxy \
+                      --mysql-port=3306 \
+                      --mysql-user=root \
+                      --mysql-password="$MYSQL_PWD" \
+                      --mysql-db={{ sysbench_database }} \
+                      --tables={{ sysbench_tables }} \
+                      --table-size={{ sysbench_table_size }} \
+                      --mysql-storage-engine=innodb \
+                      prepare
+
+- name: Wait for sysbench prepare job
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ mysql_namespace }}"
+    name: sysbench-prepare
+  register: sb_job
+  until:
+    - sb_job.resources | length == 1
+    - sb_job.resources[0].status.succeeded | default(0) | int == 1
+      or (sb_job.resources[0].status.failed | default(0) | int) > 0
+  retries: 120
+  delay: 15
+
+- name: Fail if sysbench prepare did not succeed
+  ansible.builtin.assert:
+    that:
+      - sb_job.resources[0].status.succeeded | default(0) | int == 1
+    fail_msg: >-
+      sysbench-prepare job failed. Inspect logs with
+      kubectl logs -n {{ mysql_namespace }} job/sysbench-prepare
+
+- name: Analyze sysbench tables so information_schema sizes are current
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ mysql_cluster_name }}-mysql-0"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -e
+      "ANALYZE TABLE
+      {{ sysbench_database }}.sbtest1,
+      {{ sysbench_database }}.sbtest2,
+      {{ sysbench_database }}.sbtest3,
+      {{ sysbench_database }}.sbtest4,
+      {{ sysbench_database }}.sbtest5,
+      {{ sysbench_database }}.sbtest6,
+      {{ sysbench_database }}.sbtest7,
+      {{ sysbench_database }}.sbtest8,
+      {{ sysbench_database }}.sbtest9,
+      {{ sysbench_database }}.sbtest10"
+
+- name: Measure sysbench data size on the source
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ mysql_namespace }}"
+    pod: "{{ mysql_cluster_name }}-mysql-0"
+    container: mysql
+    command: >
+      mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+      SELECT ROUND(SUM(data_length+index_length)/1024/1024)
+      FROM information_schema.tables
+      WHERE table_schema='{{ sysbench_database }}'"
+  register: size_query
+
+- name: Require 10 sysbench tables and size in the documented band
+  ansible.builtin.assert:
+    that:
+      - (size_query.stdout_lines[0] | trim | int) == (sysbench_tables | int)
+      - (size_query.stdout_lines[1] | trim | int) >= (data_size_min_mb | int)
+      - (size_query.stdout_lines[1] | trim | int) <= (data_size_max_mb | int)
+    fail_msg: >-
+      sysbench data is tables={{ size_query.stdout }} ;
+      expected {{ sysbench_tables }} tables and {{ data_size_min_mb }}-{{ data_size_max_mb }} MB

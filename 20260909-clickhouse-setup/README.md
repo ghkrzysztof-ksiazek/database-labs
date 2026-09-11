@@ -2,7 +2,7 @@
 
 A blog-ready local lab: **kind** Kubernetes, a **replicated ClickHouse** cluster managed by the **Altinity operator**, **Ansible** as the installer, **NYC taxi** sample data, and **Prometheus / Alertmanager / Grafana** with Slack notifications.
 
-Run commands from this directory (`20260910-clickhouse-setup/`).
+Run commands from this directory (`20260909-clickhouse-setup/`).
 
 This is a **test setup**. Passwords, open networks, and Slack webhooks are for a laptop lab, not production.
 

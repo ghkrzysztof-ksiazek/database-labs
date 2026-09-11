@@ -1,0 +1,39 @@
+flowchart TB
+  subgraph laptop [Your laptop]
+    A[Ansible playbooks]
+    D[Docker]
+    H[Host ports 3307 / 3001 / 9091]
+  end
+
+  A -->|kind create cluster| D
+
+  subgraph kind [kind cluster: mysql-lab]
+    CP[control-plane]
+    W1[worker]
+    W2[worker]
+
+    subgraph ns_my [namespace: mysql]
+      OP[Percona ps-operator]
+      ORC[Orchestrator]
+      HAP[HAProxy]
+      M0[MySQL source]
+      M1[MySQL replica]
+      XB[XtraBackup jobs]
+      MINIO[MinIO]
+    end
+
+    subgraph ns_mon [namespace: monitoring]
+      PROM[Prometheus]
+      GRAF[Grafana]
+    end
+  end
+
+  HAP --> M0
+  HAP --> M1
+  M1 -->|GTID binlog stream| M0
+  ORC -->|health + promotion| M0
+  ORC --> M1
+  XB --> MINIO
+  PROM -->|mysqld_exporter :9104| M0
+  PROM --> M1
+  H --> CP

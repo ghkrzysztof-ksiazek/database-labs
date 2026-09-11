@@ -1,0 +1,112 @@
+---
+- name: Ensure kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: kubeconfig
+
+- name: Fail if cluster was not created
+  ansible.builtin.assert:
+    that: kubeconfig.stat.exists
+    fail_msg: "Missing {{ kubeconfig_path }}. Run `make deploy` first."
+
+- name: Wait for MySQL pods
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/instance={{ mysql_cluster_name }}
+      - app.kubernetes.io/component=database
+  register: mysql_pods
+  until:
+    - mysql_pods.resources | length >= 2
+    - mysql_pods.resources | map(attribute='status.phase') | unique | list == ['Running']
+  retries: 30
+  delay: 10
+
+- name: Collect topology, replica status, sysbench tables, and size
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_path }}"
+    NS="{{ mysql_namespace }}"
+    DB="{{ sysbench_database }}"
+    pods=$(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    echo "PODS:"
+    echo "$pods"
+    replica_ok=0
+    primary=""
+    for p in $pods; do
+      ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" | tr -d '\r')
+      host=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@hostname" | tr -d '\r')
+      echo "POD $p hostname=$host read_only=$ro"
+      if [ "$ro" = "0" ]; then
+        primary="$p"
+      else
+        io=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT SERVICE_STATE FROM performance_schema.replication_connection_status LIMIT 1" | tr -d '\r')
+        sql=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT SERVICE_STATE FROM performance_schema.replication_applier_status LIMIT 1" | tr -d '\r')
+        echo "POD $p replica_io=$io replica_sql=$sql"
+        if [ "$io" = "ON" ] && [ "$sql" = "ON" ]; then
+          replica_ok=$((replica_ok+1))
+        fi
+      fi
+    done
+    echo "PRIMARY=$primary"
+    echo "REPLICA_OK=$replica_ok"
+    src="${primary:-$(echo "$pods" | head -1)}"
+    tables=$(kubectl -n "$NS" exec "$src" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+      "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB' AND table_name LIKE 'sbtest%'" | tr -d '\r')
+    size_mb=$(kubectl -n "$NS" exec "$src" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+      "SELECT IFNULL(ROUND(SUM(data_length+index_length)/1024/1024),0) FROM information_schema.tables WHERE table_schema='$DB'" | tr -d '\r')
+    echo "SYSBENCH_TABLES=$tables"
+    echo "SIZE_MB=$size_mb"
+  args:
+    executable: /bin/bash
+  register: topology
+  changed_when: false
+
+- name: Show topology
+  ansible.builtin.debug:
+    var: topology.stdout_lines
+
+- name: Parse topology lines
+  ansible.builtin.set_fact:
+    primary_name: "{{ topology.stdout_lines | select('match', '^PRIMARY=') | map('regex_replace', '^PRIMARY=', '') | first }}"
+    replica_ok: "{{ topology.stdout_lines | select('match', '^REPLICA_OK=') | map('regex_replace', '^REPLICA_OK=', '') | first }}"
+    sysbench_table_count: "{{ topology.stdout_lines | select('match', '^SYSBENCH_TABLES=') | map('regex_replace', '^SYSBENCH_TABLES=', '') | first }}"
+    size_mb: "{{ topology.stdout_lines | select('match', '^SIZE_MB=') | map('regex_replace', '^SIZE_MB=', '') | first }}"
+
+- name: Require a writable source and at least one applying replica
+  ansible.builtin.assert:
+    that:
+      - primary_name | length > 0
+      - (replica_ok | int) >= 1
+    fail_msg: "Replication is not healthy. Output:\n{{ topology.stdout }}"
+
+- name: Require sysbench 10 tables and size around 500MB
+  ansible.builtin.assert:
+    that:
+      - (sysbench_table_count | int) == (sysbench_tables | int)
+      - (size_mb | int) >= (data_size_min_mb | int)
+      - (size_mb | int) <= (data_size_max_mb | int)
+    fail_msg: >-
+      sysbench dataset missing or out of band. Output:
+      {{ topology.stdout }}
+
+- name: Check Prometheus scrape of mysqld
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ kind_host_prometheus_port }}/api/v1/query?query=up%7Bjob%3D%22mysql%22%7D"
+    return_content: true
+  register: prom_up
+
+- name: Require at least one MySQL Prometheus target up
+  ansible.builtin.assert:
+    that:
+      - (prom_up.json.data.result | selectattr('value.1', 'equalto', '1') | list | length) >= 1
+    fail_msg: "Prometheus is not scraping job=mysql with up=1. Body={{ prom_up.content }}"
+
+- name: Show verification result
+  ansible.builtin.debug:
+    msg: "{{ topology.stdout_lines }} ; Prometheus mysql up ok"

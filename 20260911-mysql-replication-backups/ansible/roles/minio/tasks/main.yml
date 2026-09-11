@@ -1,0 +1,85 @@
+---
+- name: Render MinIO manifests
+  ansible.builtin.template:
+    src: minio.yaml.j2
+    dest: "{{ repo_root }}/k8s/mysql/minio.yaml"
+    mode: "0644"
+
+- name: Apply MinIO
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "{{ repo_root }}/k8s/mysql/minio.yaml"
+
+- name: Wait for MinIO pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app=minio
+  register: minio_pods
+  until:
+    - minio_pods.resources | length >= 1
+    - minio_pods.resources | map(attribute='status.phase') | unique | list == ['Running']
+  retries: 36
+  delay: 5
+
+- name: Delete previous bucket job if present
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ mysql_namespace }}"
+    name: minio-make-bucket
+    wait: true
+    wait_timeout: 60
+
+- name: Create backup bucket
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: minio-make-bucket
+        namespace: "{{ mysql_namespace }}"
+      spec:
+        backoffLimit: 6
+        template:
+          spec:
+            restartPolicy: OnFailure
+            containers:
+              - name: mc
+                image: "{{ minio_mc_image }}"
+                imagePullPolicy: IfNotPresent
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    mc alias set local http://minio:9000 "{{ minio_root_user }}" "{{ minio_root_password }}"
+                    mc mb --ignore-existing local/{{ backup_bucket }}
+                    mc ls local/{{ backup_bucket }}
+
+- name: Wait for bucket job
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ mysql_namespace }}"
+    name: minio-make-bucket
+  register: bucket_job
+  until:
+    - bucket_job.resources | length == 1
+    - bucket_job.resources[0].status.succeeded | default(0) | int == 1
+      or (bucket_job.resources[0].status.failed | default(0) | int) >= 6
+  retries: 36
+  delay: 5
+
+- name: Require bucket job success
+  ansible.builtin.assert:
+    that:
+      - bucket_job.resources[0].status.succeeded | default(0) | int == 1
+    fail_msg: "MinIO bucket job failed"
