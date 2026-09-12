@@ -1,10 +1,12 @@
 # MySQL backup verification lab (localhost)
 
+Measured validation: **12/12 scenarios passed** — [ordered run report](docs/results/20260912T101400Z-validation-run.md).
+
 A blog-ready local lab that asks one question and answers it with evidence: **is this backup actually any good?**
 
 **kind** Kubernetes, a source–replica **Percona Server 8.4** cluster run by the **Percona Operator for MySQL** `1.2.0`, **XtraBackup** to in-cluster **MinIO**, a **binlog server** streaming binary logs for point-in-time recovery, and twelve Ansible-driven scenarios that create backups, restore them, recover to a point in time — and finally restore into a *separate* cluster, attach it as a replica of the live one, and watch it catch up.
 
-That last one is the point. A green backup job proves nothing. A backup is verified when it has been restored and the restored copy has been shown to be a consistent, usable database.
+That last one is the point. A green backup job does not prove recoverability. A backup is verified when it has been restored and the restored copy has been shown to be a consistent, usable database.
 
 This is a **test setup**. Passwords and open networks are for a laptop lab, not production.
 

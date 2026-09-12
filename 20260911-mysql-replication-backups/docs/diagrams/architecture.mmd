@@ -1,6 +1,3 @@
-%% Three paths through the lab. Render with mermaid-cli or paste into a mermaid viewer.
-
-%% 1. The backup path
 flowchart LR
   subgraph k8s["kind cluster mysql-lab / namespace mysql"]
     OP["ps-operator<br/>1.2.0"]
@@ -19,29 +16,3 @@ flowchart LR
   JOB -. "or the replica" .-> R
   P -- "binlog dump stream" --> BS
   BS -- "checkpoint every 30s / 16M" --> MINIO
-
-%% 2. The point-in-time recovery path
-flowchart LR
-  RCR["PerconaServerMySQLRestore<br/>backupName: t09-base<br/>pitr.type: date | gtid"] --> OP2["ps-operator"]
-  OP2 -- "1. stops the cluster" --> C["lab-mysql-*"]
-  OP2 -- "2. restores the full backup" --> C
-  MB[("mysql-lab-backups")] --> OP2
-  OP2 -- "3. replays binlogs up to the target" --> C
-  ML[("mysql-lab-binlogs")] --> OP2
-  OP2 -- "4. restarts and rebuilds replicas" --> C
-
-%% 3. The restore-as-replica verification path — the only real test
-flowchart LR
-  subgraph live["live cluster: lab"]
-    LP["lab-mysql-0<br/>still taking writes"]
-  end
-  subgraph verify["verification cluster: verify"]
-    VP["verify-mysql-0"]
-  end
-  MB2[("mysql-lab-backups<br/>s3://.../lab-<stamp>-full")]
-  LP -- "full backup" --> MB2
-  MB2 -- "restore via backupSource.destination" --> VP
-  SEC["copy lab-secrets and internal-lab<br/>the restored mysql.user table<br/>belongs to the source cluster"] -.-> VP
-  VP -- "CHANGE REPLICATION SOURCE TO<br/>SOURCE_AUTO_POSITION = 1" --> LP
-  LP -- "binlog stream: everything written<br/>since the backup" --> VP
-  VP -- "Seconds_Behind_Source = 0<br/>CHECKSUM TABLE matches" --> DONE(["backup verified"])

@@ -1,0 +1,14 @@
+flowchart LR
+  subgraph live["live cluster: lab"]
+    LP["lab-mysql-0<br/>still taking writes"]
+  end
+  subgraph verify["verification cluster: verify"]
+    VP["verify-mysql-0"]
+  end
+  MB2[("mysql-lab-backups<br/>s3://.../lab-<stamp>-full")]
+  LP -- "full backup" --> MB2
+  MB2 -- "restore via backupSource.destination" --> VP
+  SEC["copy lab-secrets and internal-lab<br/>the restored mysql.user table<br/>belongs to the source cluster"] -.-> VP
+  VP -- "CHANGE REPLICATION SOURCE TO<br/>SOURCE_AUTO_POSITION = 1" --> LP
+  LP -- "binlog stream: everything written<br/>since the backup" --> VP
+  VP -- "Seconds_Behind_Source = 0<br/>CHECKSUM TABLE matches" --> DONE(["backup verified"])

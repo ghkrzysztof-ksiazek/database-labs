@@ -9,6 +9,13 @@
         name: test_common
         tasks_from: health_gate.yml
 
+    - name: Start a fresh binlog archive after earlier restore scenarios
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: pitr_timeline.yml
+      vars:
+        scenario_id: t09
+
     - name: Remove any stale t09 base backup
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig_path }}"
@@ -82,16 +89,16 @@
         q "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.pitr_markers
              (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32), at DATETIME(6))"
         q "DELETE FROM {{ sysbench_database }}.pitr_markers"
-        q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('good', UTC_TIMESTAMP(6))"
-        echo "GOOD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='good'")"
+        q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('good-{{ t_start }}', UTC_TIMESTAMP(6))"
+        echo "GOOD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='good-{{ t_start }}'")"
         sleep 20
         # No Z suffix and no offset. search_by_timestamp in the binlog server
         # rejects 2026-09-12T09:00:00Z as an invalid timestamp format, even
         # though the upstream sample CR shows exactly that. Times are UTC.
         echo "PITR_TARGET=$(q "SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s')")"
         sleep 20
-        q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('bad', UTC_TIMESTAMP(6))"
-        echo "BAD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad'")"
+        q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('bad-{{ t_start }}', UTC_TIMESTAMP(6))"
+        echo "BAD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad-{{ t_start }}'")"
         echo "MARKERS_BEFORE_RESTORE=$(q "SELECT GROUP_CONCAT(label ORDER BY id) FROM {{ sysbench_database }}.pitr_markers")"
       args:
         executable: /bin/bash
@@ -147,7 +154,7 @@
                       credentialsSecret: "{{ minio_credentials_secret }}"
                       endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
                       region: us-east-1
-                      prefix: "{{ binlog_prefix }}"
+                      prefix: "{{ recovery_binlog_prefix }}"
 
     - name: Wait for the PITR restore to finish
       kubernetes.core.k8s_info:
@@ -181,8 +188,8 @@
         export KUBECONFIG="{{ kubeconfig_path }}"
         kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
           mysql -uroot -p{{ mysql_root_password }} -N -e \
-          "SELECT CONCAT('GOOD_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.pitr_markers WHERE label='good';
-           SELECT CONCAT('BAD_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad';
+          "SELECT CONCAT('GOOD_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.pitr_markers WHERE label='good-{{ t_start }}';
+           SELECT CONCAT('BAD_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad-{{ t_start }}';
            SELECT CONCAT('TABLES_AFTER_RESTORE=', COUNT(*)) FROM information_schema.tables
              WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';" | tr -d '\r'
       args:
@@ -230,7 +237,10 @@
         scenario_title: Point-in-time recovery to a timestamp
         scenario_status: failed
         scenario_started: "{{ t_start }}"
-        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+        scenario_evidence: >-
+          {{ [ansible_failed_result.msg | default('see play output') | string]
+             + (ansible_failed_result.stdout_lines | default([]))
+             + (ansible_failed_result.stderr_lines | default([])) }}
 
     - name: Fail the play after recording t09
       ansible.builtin.fail:

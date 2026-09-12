@@ -7,293 +7,388 @@
     t_start: "{{ lookup('pipe', 'date -u +%s') }}"
 
 - block:
-    - name: Gate on cluster health before t12
-      ansible.builtin.include_role:
-        name: test_common
-        tasks_from: health_gate.yml
+    - block:
+        - name: Gate on cluster health before t12
+          ansible.builtin.include_role:
+            name: test_common
+            tasks_from: health_gate.yml
 
-    - name: Remove any stale t12 base backup
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: absent
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLBackup
-        namespace: "{{ mysql_namespace }}"
-        name: t12-base
-        wait: true
-        wait_timeout: 180
+        - name: Keep the discovered source and use a unique marker table
+          ansible.builtin.set_fact:
+            t12_source: "{{ (health_out.stdout_lines | select('match', '^PRIMARY=') | first).split('=')[1] }}"
+            t12_marker_table: "post_backup_writes_{{ t_start }}"
 
-    - name: Take a dedicated backup for the verification restore
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: present
-        definition:
-          apiVersion: ps.percona.com/v1
-          kind: PerconaServerMySQLBackup
-          metadata:
+        - name: Remove any stale t12 base backup
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQLBackup
+            namespace: "{{ mysql_namespace }}"
             name: t12-base
+            wait: true
+            wait_timeout: 180
+
+        - name: Take a dedicated backup for the verification restore
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: present
+            definition:
+              apiVersion: ps.percona.com/v1
+              kind: PerconaServerMySQLBackup
+              metadata:
+                name: t12-base
+                namespace: "{{ mysql_namespace }}"
+              spec:
+                clusterName: "{{ mysql_cluster_name }}"
+                storageName: "{{ backup_storage_name }}"
+                type: full
+
+        - name: Wait for the t12 base backup
+          kubernetes.core.k8s_info:
+            kubeconfig: "{{ kubeconfig_path }}"
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQLBackup
             namespace: "{{ mysql_namespace }}"
-          spec:
-            clusterName: "{{ mysql_cluster_name }}"
-            storageName: "{{ backup_storage_name }}"
-            type: full
+            name: t12-base
+          register: t12_base
+          until:
+            - t12_base.resources | length == 1
+            - (t12_base.resources[0].status.state | default('') | lower)
+              in ['succeeded', 'ready', 'done', 'failed', 'error']
+          retries: 120
+          delay: 10
 
-    - name: Wait for the t12 base backup
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLBackup
-        namespace: "{{ mysql_namespace }}"
-        name: t12-base
-      register: t12_base
-      until:
-        - t12_base.resources | length == 1
-        - (t12_base.resources[0].status.state | default('') | lower)
-          in ['succeeded', 'ready', 'done', 'failed', 'error']
-      retries: 120
-      delay: 10
+        - name: Require the base backup and keep its destination
+          ansible.builtin.assert:
+            that:
+              - (t12_base.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+              - (t12_base.resources[0].status.destination | default('') | length) > 0
+            fail_msg: "t12 base backup failed: {{ t12_base.resources[0].status | default({}) }}"
 
-    - name: Require the base backup and keep its destination
-      ansible.builtin.assert:
-        that:
-          - (t12_base.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
-          - (t12_base.resources[0].status.destination | default('') | length) > 0
-        fail_msg: "t12 base backup failed: {{ t12_base.resources[0].status | default({}) }}"
+        # The restored datadir carries the SOURCE cluster's mysql.user table. A new
+        # cluster with freshly generated passwords cannot authenticate against the
+        # data it has just restored, and fails in a way that looks like a restore
+        # failure but is an authentication failure. So: same credentials.
+        - name: Copy the lab secrets to the verification cluster's names
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            NS="{{ mysql_namespace }}"
+            copy() {
+              src="$1"; dst="$2"
+              kubectl -n "$NS" get secret "$src" -o json \
+                | python3 -c "import json,sys; d=json.load(sys.stdin); d['metadata']={'name':'$dst','namespace':'$NS'}; d.pop('status',None); print(json.dumps(d))" \
+                | kubectl -n "$NS" apply -f - >/dev/null
+              echo "COPIED $src -> $dst"
+            }
+            copy {{ mysql_secrets_name }} {{ verify_cluster_name }}-secrets
+            copy internal-{{ mysql_cluster_name }} internal-{{ verify_cluster_name }}
+            if kubectl -n "$NS" get secret {{ mysql_cluster_name }}-ssl >/dev/null 2>&1; then
+              copy {{ mysql_cluster_name }}-ssl {{ verify_cluster_name }}-ssl
+            fi
+          args:
+            executable: /bin/bash
+          register: t12_secrets
+          changed_when: true
 
-    # The restored datadir carries the SOURCE cluster's mysql.user table. A new
-    # cluster with freshly generated passwords cannot authenticate against the
-    # data it has just restored, and fails in a way that looks like a restore
-    # failure but is an authentication failure. So: same credentials.
-    - name: Copy the lab secrets to the verification cluster's names
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        NS="{{ mysql_namespace }}"
-        copy() {
-          src="$1"; dst="$2"
-          kubectl -n "$NS" get secret "$src" -o json \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); d['metadata']={'name':'$dst','namespace':'$NS'}; d.pop('status',None); print(json.dumps(d))" \
-            | kubectl -n "$NS" apply -f - >/dev/null
-          echo "COPIED $src -> $dst"
-        }
-        copy {{ mysql_secrets_name }} {{ verify_cluster_name }}-secrets
-        copy internal-{{ mysql_cluster_name }} internal-{{ verify_cluster_name }}
-        if kubectl -n "$NS" get secret {{ mysql_cluster_name }}-ssl >/dev/null 2>&1; then
-          copy {{ mysql_cluster_name }}-ssl {{ verify_cluster_name }}-ssl
-        fi
-      args:
-        executable: /bin/bash
-      register: t12_secrets
-      changed_when: true
+        - name: Render the verification cluster
+          ansible.builtin.template:
+            src: verify-cluster.yaml.j2
+            dest: "{{ repo_root }}/k8s/mysql/verify-cluster.yaml"
+            mode: "0644"
 
-    - name: Render the verification cluster
-      ansible.builtin.template:
-        src: verify-cluster.yaml.j2
-        dest: "{{ repo_root }}/k8s/mysql/verify-cluster.yaml"
-        mode: "0644"
+        - name: Create the verification cluster
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: present
+            src: "{{ repo_root }}/k8s/mysql/verify-cluster.yaml"
 
-    - name: Create the verification cluster
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: present
-        src: "{{ repo_root }}/k8s/mysql/verify-cluster.yaml"
+        - name: Wait for the verification cluster to come up empty
+          kubernetes.core.k8s_info:
+            kubeconfig: "{{ kubeconfig_path }}"
+            kind: Pod
+            namespace: "{{ mysql_namespace }}"
+            label_selectors:
+              - app.kubernetes.io/instance={{ verify_cluster_name }}
+              - app.kubernetes.io/component=database
+          register: t12_pods
+          until:
+            - t12_pods.resources | length >= 1
+            - t12_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+          retries: 90
+          delay: 10
 
-    - name: Wait for the verification cluster to come up empty
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        kind: Pod
-        namespace: "{{ mysql_namespace }}"
-        label_selectors:
-          - app.kubernetes.io/instance={{ verify_cluster_name }}
-          - app.kubernetes.io/component=database
-      register: t12_pods
-      until:
-        - t12_pods.resources | length >= 1
-        - t12_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
-      retries: 90
-      delay: 10
-
-    - name: Write to the live cluster so the backup is provably stale
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
-          mysql -uroot -p{{ mysql_root_password }} -N -e \
-          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.post_backup_writes
-             (id INT AUTO_INCREMENT PRIMARY KEY, at DATETIME(6));
-           INSERT INTO {{ sysbench_database }}.post_backup_writes (at)
-             SELECT UTC_TIMESTAMP(6) FROM {{ sysbench_database }}.sbtest1 LIMIT 20000;
-           SELECT CONCAT('WRITES_AFTER_BACKUP=', COUNT(*)) FROM {{ sysbench_database }}.post_backup_writes;" | tr -d '\r'
-      args:
-        executable: /bin/bash
-      register: t12_writes
-      changed_when: true
-
-    - name: Remove any stale t12 restore object
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: absent
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLRestore
-        namespace: "{{ mysql_namespace }}"
-        name: t12-restore
-        wait: true
-        wait_timeout: 180
-
-    - name: Restore the backup into the verification cluster from MinIO
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: present
-        definition:
-          apiVersion: ps.percona.com/v1
-          kind: PerconaServerMySQLRestore
-          metadata:
+        - name: Remove any stale t12 restore object
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQLRestore
+            namespace: "{{ mysql_namespace }}"
             name: t12-restore
+            wait: true
+            wait_timeout: 180
+
+        - name: Start the restore clock
+          ansible.builtin.set_fact:
+            t12_restore_started: "{{ lookup('pipe', 'date -u +%s') }}"
+
+        - name: Restore the backup into the verification cluster from MinIO
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: present
+            definition:
+              apiVersion: ps.percona.com/v1
+              kind: PerconaServerMySQLRestore
+              metadata:
+                name: t12-restore
+                namespace: "{{ mysql_namespace }}"
+              spec:
+                clusterName: "{{ verify_cluster_name }}"
+                backupSource:
+                  destination: "{{ t12_base.resources[0].status.destination }}"
+                  storage: "{{ t12_base.resources[0].status.storage }}"
+
+        - name: Write to the live cluster so the backup is provably stale
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            kubectl -n {{ mysql_namespace }} exec {{ t12_source }} -c mysql -- \
+              mysql -uroot -p{{ mysql_root_password }} -N -e \
+              "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.{{ t12_marker_table }}
+                 (id INT AUTO_INCREMENT PRIMARY KEY, at DATETIME(6));
+               INSERT INTO {{ sysbench_database }}.{{ t12_marker_table }} (at)
+                 SELECT UTC_TIMESTAMP(6) FROM {{ sysbench_database }}.sbtest1 LIMIT 20000;
+               SELECT CONCAT('WRITES_AFTER_BACKUP=', COUNT(*)) FROM {{ sysbench_database }}.{{ t12_marker_table }};" | tr -d '\r'
+          args:
+            executable: /bin/bash
+          register: t12_writes
+          changed_when: true
+
+        - name: Wait for the cross-cluster restore
+          kubernetes.core.k8s_info:
+            kubeconfig: "{{ kubeconfig_path }}"
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQLRestore
             namespace: "{{ mysql_namespace }}"
-          spec:
-            clusterName: "{{ verify_cluster_name }}"
-            backupSource:
-              destination: "{{ t12_base.resources[0].status.destination }}"
-              storage:
-                type: s3
-                s3:
-                  bucket: "{{ backup_bucket }}"
-                  credentialsSecret: "{{ minio_credentials_secret }}"
-                  endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
-                  region: us-east-1
+            name: t12-restore
+          register: t12_rst
+          until:
+            - t12_rst.resources | length == 1
+            - (t12_rst.resources[0].status.state | default('') | lower)
+              in ['succeeded', 'ready', 'done', 'failed', 'error']
+          retries: 160
+          delay: 15
 
-    - name: Wait for the cross-cluster restore
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLRestore
-        namespace: "{{ mysql_namespace }}"
-        name: t12-restore
-      register: t12_rst
-      until:
-        - t12_rst.resources | length == 1
-        - (t12_rst.resources[0].status.state | default('') | lower)
-          in ['succeeded', 'ready', 'done', 'failed', 'error']
-      retries: 160
-      delay: 15
+        - name: Require the cross-cluster restore to have succeeded
+          ansible.builtin.assert:
+            that:
+              - (t12_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+            fail_msg: >-
+              Restore into {{ verify_cluster_name }} failed:
+              {{ t12_rst.resources[0].status | default({}) }}
 
-    - name: Require the cross-cluster restore to have succeeded
-      ansible.builtin.assert:
-        that:
-          - (t12_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
-        fail_msg: >-
-          Restore into {{ verify_cluster_name }} failed:
-          {{ t12_rst.resources[0].status | default({}) }}
+        - name: Wait for the restored node to serve SQL
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            kubectl -n {{ mysql_namespace }} exec {{ verify_cluster_name }}-mysql-0 -c mysql -- \
+              mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT 1" | tr -d '\r'
+          args:
+            executable: /bin/bash
+          register: t12_ping
+          changed_when: false
+          retries: 40
+          delay: 15
+          until: t12_ping.rc == 0
 
-    - name: Wait for the restored node to serve SQL
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        kubectl -n {{ mysql_namespace }} exec {{ verify_cluster_name }}-mysql-0 -c mysql -- \
-          mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT 1" | tr -d '\r'
-      args:
-        executable: /bin/bash
-      register: t12_ping
-      changed_when: false
-      retries: 40
-      delay: 15
-      until: t12_ping.rc == 0
+        - name: Show what the restored copy knows before replication starts
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            V="{{ verify_cluster_name }}-mysql-0"
+            q() { kubectl -n {{ mysql_namespace }} exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} --raw -N -e "$1" | tr -d '\r\n'; }
+            L="{{ t12_source }}"
+            ql() { kubectl -n {{ mysql_namespace }} exec "$L" -c mysql -- mysql -uroot -p{{ mysql_root_password }} --raw -N -e "$1" | tr -d '\r\n'; }
+            lu=$(ql 'SELECT @@server_uuid'); vu=$(q 'SELECT @@server_uuid')
+            li=$(ql 'SELECT @@server_id'); vi=$(q 'SELECT @@server_id')
+            echo "SERVER_UUID live=$lu restored=$vu"
+            echo "SERVER_ID live=$li restored=$vi"
+            test "$lu" != "$vu"
+            test "$li" != "$vi"
+            test "$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name='{{ t12_marker_table }}'")" = 0
+            echo "RESTORE_SECONDS=$(( $(date -u +%s) - {{ t12_restore_started }} ))"
+            test -n "$(q 'SELECT @@GLOBAL.gtid_purged')"
+            echo "RESTORED_GTID_PURGED=$(q 'SELECT @@GLOBAL.gtid_purged')"
+            echo "RESTORED_TABLES=$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%'")"
+            echo "RESTORED_POST_BACKUP_ROWS=$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name='{{ t12_marker_table }}'")"
+          args:
+            executable: /bin/bash
+          register: t12_pre_repl
+          changed_when: false
 
-    - name: Show what the restored copy knows before replication starts
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        V="{{ verify_cluster_name }}-mysql-0"
-        q() { kubectl -n {{ mysql_namespace }} exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
-        echo "RESTORED_GTID_PURGED=$(q 'SELECT @@GLOBAL.gtid_purged')"
-        echo "RESTORED_TABLES=$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%'")"
-        echo "RESTORED_POST_BACKUP_ROWS=$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name='post_backup_writes'")"
-      args:
-        executable: /bin/bash
-      register: t12_pre_repl
-      changed_when: false
+        - name: Save the restored GTID set and start the catch-up clock
+          ansible.builtin.set_fact:
+            t12_restored_gtid: "{{ (t12_pre_repl.stdout_lines | select('match', '^RESTORED_GTID_PURGED=') | first).split('=')[1] }}"
+            t12_catchup_started: "{{ lookup('pipe', 'date -u +%s') }}"
 
-    - name: Point the restored copy at the live primary and start replicating
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        NS="{{ mysql_namespace }}"
-        V="{{ verify_cluster_name }}-mysql-0"
-        REPL_PASS=$(kubectl -n "$NS" get secret internal-{{ mysql_cluster_name }} -o jsonpath='{.data.replication}' | base64 -d)
-        SOURCE_HOST="{{ mysql_cluster_name }}-mysql-0.{{ mysql_cluster_name }}-mysql.$NS.svc.cluster.local"
-        kubectl -n "$NS" exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -e \
-          "STOP REPLICA;
-           CHANGE REPLICATION SOURCE TO
-             SOURCE_HOST='$SOURCE_HOST',
-             SOURCE_PORT=3306,
-             SOURCE_USER='replication',
-             SOURCE_PASSWORD='$REPL_PASS',
-             SOURCE_SSL=1,
-             SOURCE_AUTO_POSITION=1;
-           START REPLICA;"
-        echo "SOURCE_HOST=$SOURCE_HOST"
-        echo "REPLICATION_STARTED=yes"
-      args:
-        executable: /bin/bash
-      register: t12_change_source
-      changed_when: true
+        - name: Point the restored copy at the live primary and start replicating
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            NS="{{ mysql_namespace }}"
+            V="{{ verify_cluster_name }}-mysql-0"
+            REPL_PASS=$(kubectl -n "$NS" get secret internal-{{ mysql_cluster_name }} -o jsonpath='{.data.replication}' | base64 -d)
+            SOURCE_HOST="{{ t12_source }}.{{ mysql_cluster_name }}-mysql.$NS.svc.cluster.local"
+            kubectl -n "$NS" exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -e \
+              "STOP REPLICA;
+               CHANGE REPLICATION SOURCE TO
+                 SOURCE_HOST='$SOURCE_HOST',
+                 SOURCE_PORT=3306,
+                 SOURCE_USER='replication',
+                 SOURCE_PASSWORD='$REPL_PASS',
+                 SOURCE_SSL=1,
+                 SOURCE_AUTO_POSITION=1;
+               SET GLOBAL super_read_only=ON;
+               START REPLICA;"
+            echo "SOURCE_HOST=$SOURCE_HOST"
+            echo "REPLICATION_STARTED=yes"
+          args:
+            executable: /bin/bash
+          register: t12_change_source
+          changed_when: true
 
-    - name: Wait for the restored copy to catch up
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        V="{{ verify_cluster_name }}-mysql-0"
-        kubectl -n {{ mysql_namespace }} exec "$V" -c mysql -- \
-          mysql -uroot -p{{ mysql_root_password }} -e "SHOW REPLICA STATUS\G" \
-          | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source|Last_IO_Error|Last_SQL_Error|Retrieved_Gtid_Set|Executed_Gtid_Set' \
-          | sed 's/^ *//' | tr -d '\r'
-      args:
-        executable: /bin/bash
-      register: t12_repl
-      changed_when: false
-      until:
-        - t12_repl.stdout is search('Replica_IO_Running: Yes')
-        - t12_repl.stdout is search('Replica_SQL_Running: Yes')
-        - t12_repl.stdout is search('Seconds_Behind_Source: 0')
-      retries: "{{ verify_catchup_retries }}"
-      delay: "{{ verify_catchup_delay }}"
+        - name: Wait for the restored copy to catch up
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            V="{{ verify_cluster_name }}-mysql-0"
+            kubectl -n {{ mysql_namespace }} exec "$V" -c mysql -- \
+              mysql -uroot -p{{ mysql_root_password }} -e "SHOW REPLICA STATUS\G" \
+              | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source|Last_IO_Error|Last_SQL_Error|Retrieved_Gtid_Set|Executed_Gtid_Set' \
+              | sed 's/^ *//' | tr -d '\r'
+          args:
+            executable: /bin/bash
+          register: t12_repl
+          changed_when: false
+          until:
+            - "t12_repl.stdout is search('Replica_IO_Running: Yes')"
+            - "t12_repl.stdout is search('Replica_SQL_Running: Yes')"
+            - "t12_repl.stdout is search('Seconds_Behind_Source: 0')"
+          retries: "{{ verify_catchup_retries }}"
+          delay: "{{ verify_catchup_delay }}"
 
-    - name: Compare both clusters once the writes have stopped
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        NS="{{ mysql_namespace }}"
-        L="{{ mysql_cluster_name }}-mysql-0"
-        V="{{ verify_cluster_name }}-mysql-0"
-        ql() { kubectl -n "$NS" exec "$L" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
-        qv() { kubectl -n "$NS" exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
-        sleep 15
-        echo "LIVE_POST_BACKUP_ROWS=$(ql "SELECT COUNT(*) FROM {{ sysbench_database }}.post_backup_writes")"
-        echo "REPLICA_POST_BACKUP_ROWS=$(qv "SELECT COUNT(*) FROM {{ sysbench_database }}.post_backup_writes")"
-        mismatch=0
-        for i in $(seq 1 {{ sysbench_tables }}); do
-          a=$(ql "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i" | awk '{print $2}')
-          b=$(qv "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i" | awk '{print $2}')
-          echo "CHECKSUM sbtest$i live=$a replica=$b"
-          [ "$a" = "$b" ] || mismatch=$((mismatch+1))
-        done
-        echo "CHECKSUM_MISMATCHES=$mismatch"
-        echo "LIVE_GTID=$(ql 'SELECT @@GLOBAL.gtid_executed')"
-        echo "REPLICA_GTID=$(qv 'SELECT @@GLOBAL.gtid_executed')"
-      args:
-        executable: /bin/bash
-      register: t12_compare
-      changed_when: false
+        - name: Compare both clusters once the writes have stopped
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            NS="{{ mysql_namespace }}"
+            L="{{ t12_source }}"
+            V="{{ verify_cluster_name }}-mysql-0"
+            ql() { kubectl -n "$NS" exec "$L" -c mysql -- mysql -uroot -p{{ mysql_root_password }} --raw -N -e "$1" | tr -d '\r\n'; }
+            qv() { kubectl -n "$NS" exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} --raw -N -e "$1" | tr -d '\r\n'; }
+            target=$(ql 'SELECT @@GLOBAL.gtid_executed')
+            waited=$(qv "SELECT WAIT_FOR_EXECUTED_GTID_SET('$target', 120)")
+            test "$waited" = 0
+            echo "CATCHUP_SECONDS=$(( $(date -u +%s) - {{ t12_catchup_started }} ))"
+            subset=$(qv "SELECT GTID_SUBSET('{{ t12_restored_gtid }}', @@GLOBAL.gtid_executed)")
+            echo "RESTORED_GTID_SUBSET=$subset"
+            test "$subset" = 1
+            subset=$(qv "SELECT GTID_SUBSET('$target', @@GLOBAL.gtid_executed)")
+            echo "SOURCE_GTID_SUBSET=$subset"
+            test "$subset" = 1
+            gap=$(ql "SELECT GTID_SUBTRACT('$target', '{{ t12_restored_gtid }}')")
+            echo "GTID_GAP_REPLAYED=$gap"
+            printf '%s' "$gap" | python3 -c 'import sys; s=sys.stdin.read().strip(); intervals=[i for u in s.split(",") if u for i in u.strip().split(":")[1:]]; print("GTID_GAP_TRANSACTIONS="+str(sum(int(i.split("-")[-1])-int(i.split("-")[0])+1 for i in intervals)))'
+            echo "LIVE_POST_BACKUP_ROWS=$(ql "SELECT COUNT(*) FROM {{ sysbench_database }}.{{ t12_marker_table }}")"
+            echo "REPLICA_POST_BACKUP_ROWS=$(qv "SELECT COUNT(*) FROM {{ sysbench_database }}.{{ t12_marker_table }}")"
+            mismatch=0
+            for i in $(seq 1 {{ sysbench_tables }}); do
+              live_rows=$(ql "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest$i")
+              replica_rows=$(qv "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest$i")
+              echo "ROWS sbtest$i live=$live_rows replica=$replica_rows"
+              test "$live_rows" = "{{ sysbench_table_size }}"
+              test "$replica_rows" = "{{ sysbench_table_size }}"
+              a=$(ql "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i" | awk '{print $2}')
+              b=$(qv "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i" | awk '{print $2}')
+              echo "CHECKSUM sbtest$i live=$a replica=$b"
+              [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$a" = "$b" ]] || mismatch=$((mismatch+1))
+            done
+            echo "CHECKSUM_MISMATCHES=$mismatch"
+            echo "LIVE_GTID=$(ql 'SELECT @@GLOBAL.gtid_executed')"
+            test "$(ql "SELECT COUNT(*) FROM {{ sysbench_database }}.{{ t12_marker_table }}")" = 20000
+            test "$(qv "SELECT COUNT(*) FROM {{ sysbench_database }}.{{ t12_marker_table }}")" = 20000
+            echo "REPLICA_GTID=$(qv 'SELECT @@GLOBAL.gtid_executed')"
+          args:
+            executable: /bin/bash
+          register: t12_compare
+          changed_when: false
 
-    - name: Require a caught-up, checksum-identical replica
-      ansible.builtin.assert:
-        that:
-          - "'CHECKSUM_MISMATCHES=0' in t12_compare.stdout"
-          - (t12_compare.stdout_lines | select('match', '^REPLICA_POST_BACKUP_ROWS=') | first).split('=')[1] | int
-            == (t12_compare.stdout_lines | select('match', '^LIVE_POST_BACKUP_ROWS=') | first).split('=')[1] | int
-          - (t12_compare.stdout_lines | select('match', '^REPLICA_POST_BACKUP_ROWS=') | first).split('=')[1] | int > 0
-        fail_msg: >-
-          The restored copy is not a faithful replica: {{ t12_compare.stdout }}
+        - name: Require a caught-up, checksum-identical replica
+          ansible.builtin.assert:
+            that:
+              - "'CHECKSUM_MISMATCHES=0' in t12_compare.stdout"
+              - (t12_compare.stdout_lines | select('match', '^REPLICA_POST_BACKUP_ROWS=') | first).split('=')[1] | int
+                == (t12_compare.stdout_lines | select('match', '^LIVE_POST_BACKUP_ROWS=') | first).split('=')[1] | int
+              - (t12_compare.stdout_lines | select('match', '^REPLICA_POST_BACKUP_ROWS=') | first).split('=')[1] | int > 0
+            fail_msg: >-
+              The restored copy is not a faithful replica: {{ t12_compare.stdout }}
+
+
+      always:
+        - name: Delete the verification cluster
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQL
+            namespace: "{{ mysql_namespace }}"
+            name: "{{ verify_cluster_name }}"
+            wait: true
+            wait_timeout: 300
+
+        - name: Delete the verification restore object and copied secrets
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: "{{ item.api }}"
+            kind: "{{ item.kind }}"
+            namespace: "{{ mysql_namespace }}"
+            name: "{{ item.name }}"
+          loop:
+            - {api: "ps.percona.com/v1", kind: "PerconaServerMySQLRestore", name: "t12-restore"}
+            - {api: "v1", kind: "Secret", name: "{{ verify_cluster_name }}-secrets"}
+            - {api: "v1", kind: "Secret", name: "internal-{{ verify_cluster_name }}"}
+            - {api: "v1", kind: "Secret", name: "{{ verify_cluster_name }}-ssl"}
+
+        - name: Delete the verification cluster's PVCs
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            kubectl -n {{ mysql_namespace }} delete pvc \
+              -l app.kubernetes.io/instance={{ verify_cluster_name }} --ignore-not-found --timeout=180s
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Verify disposable cluster resources are gone
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG="{{ kubeconfig_path }}"
+            remaining=$(kubectl -n {{ mysql_namespace }} get pods,pvc -l app.kubernetes.io/instance={{ verify_cluster_name }} -o name)
+            test -z "$remaining"
+            echo "VERIFY_RESOURCES_REMAINING=0"
+          args:
+            executable: /bin/bash
+          register: t12_cleanup
+          changed_when: false
+
+        - name: Require the source cluster to remain healthy after cleanup
+          ansible.builtin.include_role:
+            name: test_common
+            tasks_from: health_gate.yml
+
 
     - name: Record t12 as passed
       ansible.builtin.include_role:
@@ -314,8 +409,9 @@
              + t12_pre_repl.stdout_lines
              + t12_change_source.stdout_lines
              + t12_repl.stdout_lines
-             + t12_compare.stdout_lines }}
-
+             + t12_compare.stdout_lines
+             + t12_cleanup.stdout_lines
+             + ['SOURCE_HEALTH_AFTER_CLEANUP=' ~ health_summary] }}
   rescue:
     - name: Record t12 as failed
       ansible.builtin.include_role:
@@ -326,47 +422,11 @@
         scenario_title: Restore into a new cluster, attach as a replica, catch up
         scenario_status: failed
         scenario_started: "{{ t_start }}"
-        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+        scenario_evidence: >-
+          {{ [ansible_failed_result.msg | default('see play output') | string]
+             + (ansible_failed_result.stdout_lines | default([]))
+             + (ansible_failed_result.stderr_lines | default([])) }}
 
     - name: Fail the play after recording t12
       ansible.builtin.fail:
         msg: "t12 failed: {{ ansible_failed_result.msg | default('see above') }}"
-
-  always:
-    - name: Delete the verification cluster
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: absent
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQL
-        namespace: "{{ mysql_namespace }}"
-        name: "{{ verify_cluster_name }}"
-        wait: true
-        wait_timeout: 300
-      failed_when: false
-
-    - name: Delete the verification restore object and copied secrets
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: absent
-        api_version: "{{ item.api }}"
-        kind: "{{ item.kind }}"
-        namespace: "{{ mysql_namespace }}"
-        name: "{{ item.name }}"
-      loop:
-        - {api: "ps.percona.com/v1", kind: "PerconaServerMySQLRestore", name: "t12-restore"}
-        - {api: "v1", kind: "Secret", name: "{{ verify_cluster_name }}-secrets"}
-        - {api: "v1", kind: "Secret", name: "internal-{{ verify_cluster_name }}"}
-        - {api: "v1", kind: "Secret", name: "{{ verify_cluster_name }}-ssl"}
-      failed_when: false
-
-    - name: Delete the verification cluster's PVCs
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG="{{ kubeconfig_path }}"
-        kubectl -n {{ mysql_namespace }} delete pvc \
-          -l app.kubernetes.io/instance={{ verify_cluster_name }} --ignore-not-found
-      args:
-        executable: /bin/bash
-      changed_when: true
-      failed_when: false

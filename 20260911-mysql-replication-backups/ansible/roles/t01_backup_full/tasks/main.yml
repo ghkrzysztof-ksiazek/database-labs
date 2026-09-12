@@ -112,7 +112,10 @@
         scenario_title: On-demand full backup to MinIO
         scenario_status: failed
         scenario_started: "{{ t_start }}"
-        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+        scenario_evidence: >-
+          {{ [ansible_failed_result.msg | default('see play output') | string]
+             + (ansible_failed_result.stdout_lines | default([]))
+             + (ansible_failed_result.stderr_lines | default([])) }}
 
     - name: Fail the play after recording t01
       ansible.builtin.fail:

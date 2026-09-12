@@ -8,13 +8,21 @@
   ansible.builtin.shell: |
     set -euo pipefail
     export KUBECONFIG="{{ kubeconfig_path }}"
-    kubectl -n {{ mysql_namespace }} run mc-$RANDOM --rm -i --restart=Never --quiet \
+    pod="mc-$RANDOM-$(date +%s)"
+    trap 'kubectl -n {{ mysql_namespace }} delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
+    kubectl -n {{ mysql_namespace }} run "$pod" --restart=Never --quiet \
       --image={{ minio_mc_image }} --command -- \
-      sh -c "echo {{ mc_script | b64encode }} | base64 -d | sh"
+      sh -c "echo {{ mc_script | b64encode }} | base64 -d | sh" >/dev/null
+    if ! kubectl -n {{ mysql_namespace }} wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$pod" --timeout=120s >/dev/null; then
+      kubectl -n {{ mysql_namespace }} logs "$pod"
+      exit 1
+    fi
+    kubectl -n {{ mysql_namespace }} logs "$pod"
   args:
     executable: /bin/bash
   vars:
     mc_script: |
+      set -eu
       mc alias set local http://minio:9000 {{ minio_root_user }} {{ minio_root_password }} >/dev/null 2>&1
       {{ mc_args }}
   register: mc_out

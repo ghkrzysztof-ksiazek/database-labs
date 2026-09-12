@@ -39,11 +39,19 @@
         fi
       fi
     done
+    test -n "$primary"
+    tables=$(kubectl -n "$NS" exec "$primary" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name REGEXP '^sbtest[0-9]+$'")
+    echo "SYSBENCH_TABLES=$tables"
+    test "$tables" -eq {{ sysbench_tables }}
+    test "$replica_ok" -eq {{ mysql_size | int - 1 }}
     echo "PRIMARY=$primary"
     echo "REPLICA_OK=$replica_ok"
     bs=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=binlog-server \
       -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null | tr '\n' ' ')
     echo "BINLOG_SERVER=${bs:-none}"
+    {% if pitr_enabled %}
+    echo "$bs" | grep -F '{{ mysql_cluster_name }}-binlog-server-0=Running' >/dev/null
+    {% endif %}
   args:
     executable: /bin/bash
   register: health_out

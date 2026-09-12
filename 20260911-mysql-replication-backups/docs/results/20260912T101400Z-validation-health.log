@@ -1,0 +1,66 @@
+
+PLAY [Verify MySQL replication lab] ********************************************
+
+TASK [verify_cluster : Ensure kubeconfig exists] *******************************
+ok: [localhost]
+
+TASK [verify_cluster : Fail if cluster was not created] ************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [verify_cluster : Wait for MySQL pods] ************************************
+ok: [localhost]
+
+TASK [verify_cluster : Collect topology, replica status, sysbench tables, and size] ***
+ok: [localhost]
+
+TASK [verify_cluster : Show topology] ******************************************
+ok: [localhost] => {
+    "topology.stdout_lines": [
+        "PODS:",
+        "lab-mysql-0",
+        "lab-mysql-1",
+        "POD lab-mysql-0 hostname=lab-mysql-0 read_only=0",
+        "POD lab-mysql-1 hostname=lab-mysql-1 read_only=1",
+        "POD lab-mysql-1 replica_io=ON replica_sql=ON",
+        "PRIMARY=lab-mysql-0",
+        "REPLICA_OK=1",
+        "SYSBENCH_TABLES=10",
+        "SIZE_MB=511"
+    ]
+}
+
+TASK [verify_cluster : Parse topology lines] ***********************************
+ok: [localhost]
+
+TASK [verify_cluster : Require a writable source and at least one applying replica] ***
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [verify_cluster : Require sysbench 10 tables and size around 500MB] *******
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [verify_cluster : Check Prometheus scrape of mysqld] **********************
+ok: [localhost]
+
+TASK [verify_cluster : Require at least one MySQL Prometheus target up] ********
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [verify_cluster : Show verification result] *******************************
+ok: [localhost] => {
+    "msg": "['PODS:', 'lab-mysql-0', 'lab-mysql-1', 'POD lab-mysql-0 hostname=lab-mysql-0 read_only=0', 'POD lab-mysql-1 hostname=lab-mysql-1 read_only=1', 'POD lab-mysql-1 replica_io=ON replica_sql=ON', 'PRIMARY=lab-mysql-0', 'REPLICA_OK=1', 'SYSBENCH_TABLES=10', 'SIZE_MB=511'] ; Prometheus mysql up ok"
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=11   changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+

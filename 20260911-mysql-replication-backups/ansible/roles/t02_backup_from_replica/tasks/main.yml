@@ -56,7 +56,7 @@
       ansible.builtin.shell: |
         set -euo pipefail
         export KUBECONFIG="{{ kubeconfig_path }}"
-        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+        kubectl -n {{ mysql_namespace }} exec {{ (health_out.stdout_lines | select('match', '^PRIMARY=') | first).split('=')[1] }} -c mysql -- \
           mysql -uroot -p{{ mysql_root_password }} -N -e \
           "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.t02_writes (id INT AUTO_INCREMENT PRIMARY KEY, at DATETIME);
            INSERT INTO {{ sysbench_database }}.t02_writes (at) VALUES (UTC_TIMESTAMP());
@@ -87,7 +87,8 @@
         that:
           - (t02_bkp.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
           - backup_bucket in (t02_bkp.resources[0].status.destination | default(''))
-          - (replica_pod.stdout | trim) != (mysql_cluster_name ~ '-mysql-0')
+          - (t02_bkp.resources[0].status.backupSource | default('')).split('.')[0] == (replica_pod.stdout | trim)
+          - (replica_pod.stdout | trim) != (health_out.stdout_lines | select('match', '^PRIMARY=') | first).split('=')[1]
           - "'PRIMARY_WRITABLE=yes' in primary_writes.stdout"
         fail_msg: >-
           Replica-sourced backup failed: pod={{ replica_pod.stdout | trim }}
@@ -103,7 +104,7 @@
         scenario_status: passed
         scenario_started: "{{ t_start }}"
         scenario_evidence: >-
-          {{ ['SOURCE_POD=' ~ (replica_pod.stdout | trim)]
+          {{ ['SOURCE_POD=' ~ (replica_pod.stdout | trim), 'ACTUAL_BACKUP_SOURCE=' ~ t02_bkp.resources[0].status.backupSource]
              + ['BACKUP_STATE=' ~ t02_bkp.resources[0].status.state]
              + ['BACKUP_DESTINATION=' ~ (t02_bkp.resources[0].status.destination | default('n/a'))]
              + ['BACKUP_COMPLETED=' ~ (t02_bkp.resources[0].status.completed | default('n/a'))]
@@ -119,7 +120,10 @@
         scenario_title: Backup taken from the replica, primary untouched
         scenario_status: failed
         scenario_started: "{{ t_start }}"
-        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+        scenario_evidence: >-
+          {{ [ansible_failed_result.msg | default('see play output') | string]
+             + (ansible_failed_result.stdout_lines | default([]))
+             + (ansible_failed_result.stderr_lines | default([])) }}
 
     - name: Fail the play after recording t02
       ansible.builtin.fail:

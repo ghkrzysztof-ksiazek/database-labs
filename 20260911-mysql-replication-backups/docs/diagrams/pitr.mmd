@@ -1,0 +1,8 @@
+flowchart LR
+  RCR["PerconaServerMySQLRestore<br/>backupName: t09-base<br/>pitr.type: date | gtid"] --> OP2["ps-operator"]
+  OP2 -- "1. stops the cluster" --> C["lab-mysql-*"]
+  OP2 -- "2. restores the full backup" --> C
+  MB[("mysql-lab-backups")] --> OP2
+  OP2 -- "3. replays binlogs up to the target" --> C
+  ML[("mysql-lab-binlogs")] --> OP2
+  OP2 -- "4. restarts and rebuilds replicas" --> C

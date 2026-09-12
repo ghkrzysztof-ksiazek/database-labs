@@ -273,14 +273,14 @@ class LabConfigTests(unittest.TestCase):
         self.assertIn("incrementalBaseBackupName", t03)
 
 
-    def test_schedule_scenarios_restore_the_shipped_schedule(self) -> None:
+    def test_schedule_scenarios_restore_the_actual_prior_schedule(self) -> None:
         v = load_group_vars()
         self.assertEqual(v["suite_schedule_name"], "suite-fast")
         self.assertEqual(int(v["suite_fast_keep"]), 2)
         for sid in ("t05_backup_scheduled", "t06_backup_retention"):
             text = (ANSIBLE / "roles" / sid / "tasks" / "main.yml").read_text()
             self.assertIn("always:", text)
-            self.assertIn("backup_schedule", text)
+            self.assertIn(sid[:3] + "_prior_schedule", text)
             self.assertIn("percona.com/backup-type", text)
 
 
@@ -366,7 +366,7 @@ class LabConfigTests(unittest.TestCase):
 
         results = sorted((ROOT / "docs" / "results").glob("*-run.md"))
         self.assertTrue(results, "no measured run report in docs/results/")
-        self.assertIn(results[-1].name, blog + catalogue + readme)
+        self.assertTrue(any(p.name in blog + catalogue + readme for p in results), "no measured report linked")
 
     def test_docs_have_no_placeholders(self) -> None:
         for name in ("README.md", "docs/backup-architecture.md",

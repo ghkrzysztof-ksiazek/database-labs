@@ -9,6 +9,23 @@
         name: test_common
         tasks_from: health_gate.yml
 
+    - name: Start a fresh binlog archive after earlier restore scenarios
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: pitr_timeline.yml
+      vars:
+        scenario_id: t10
+
+    - name: Capture inherited GTIDs before taking the base
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ (health_out.stdout_lines | select('match', '^PRIMARY=') | first).split('=')[1] }} -c mysql -- mysql -uroot -p{{ mysql_root_password }} --raw -N -e "SELECT @@GLOBAL.gtid_executed" | tr -d '\r\n'
+      args:
+        executable: /bin/bash
+      register: t10_inherited
+      changed_when: false
+
     - name: Remove any stale t10 base backup
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig_path }}"
@@ -78,16 +95,17 @@
         export KUBECONFIG="{{ kubeconfig_path }}"
         NS="{{ mysql_namespace }}"
         POD="{{ t10_primary.stdout | trim }}"
-        q() { kubectl -n "$NS" exec "$POD" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        q() { kubectl -n "$NS" exec "$POD" -c mysql -- mysql -uroot -p{{ mysql_root_password }} --batch --raw --skip-column-names -e "$1" | tr -d '\r'; }
         q "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.gtid_markers
              (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32))"
         q "DELETE FROM {{ sysbench_database }}.gtid_markers"
-        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('keep-me')"
+        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('keep-me-{{ t_start }}')"
         echo "ROWS_BEFORE_DAMAGE=$(q "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest9")"
-        echo "GTID_TARGET=$(q "SELECT @@GLOBAL.gtid_executed" | tr -d '\n')"
+        echo "INHERITED_GTIDS={{ t10_inherited.stdout | trim }}"
+        echo "GTID_TARGET=$(q "SELECT GTID_SUBTRACT(@@GLOBAL.gtid_executed, '{{ t10_inherited.stdout | trim }}')" | tr -d '\n')"
         sleep 20
         q "DELETE FROM {{ sysbench_database }}.sbtest9"
-        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('after-damage')"
+        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('after-damage-{{ t_start }}')"
         echo "ROWS_AFTER_DAMAGE=$(q "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest9")"
       args:
         executable: /bin/bash
@@ -143,7 +161,7 @@
                       credentialsSecret: "{{ minio_credentials_secret }}"
                       endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
                       region: us-east-1
-                      prefix: "{{ binlog_prefix }}"
+                      prefix: "{{ recovery_binlog_prefix }}"
 
     - name: Wait for the PITR restore to finish
       kubernetes.core.k8s_info:
@@ -178,8 +196,8 @@
         kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
           mysql -uroot -p{{ mysql_root_password }} -N -e \
           "SELECT CONCAT('ROWS_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.sbtest9;
-           SELECT CONCAT('KEEP_MARKER=', COUNT(*)) FROM {{ sysbench_database }}.gtid_markers WHERE label='keep-me';
-           SELECT CONCAT('DAMAGE_MARKER=', COUNT(*)) FROM {{ sysbench_database }}.gtid_markers WHERE label='after-damage';
+           SELECT CONCAT('KEEP_MARKER=', COUNT(*)) FROM {{ sysbench_database }}.gtid_markers WHERE label='keep-me-{{ t_start }}';
+           SELECT CONCAT('DAMAGE_MARKER=', COUNT(*)) FROM {{ sysbench_database }}.gtid_markers WHERE label='after-damage-{{ t_start }}';
            SELECT CONCAT('GTID_AFTER_RESTORE=', @@GLOBAL.gtid_executed);" | tr -d '\r'
       args:
         executable: /bin/bash
@@ -227,7 +245,10 @@
         scenario_title: Point-in-time recovery to a GTID
         scenario_status: failed
         scenario_started: "{{ t_start }}"
-        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+        scenario_evidence: >-
+          {{ [ansible_failed_result.msg | default('see play output') | string]
+             + (ansible_failed_result.stdout_lines | default([]))
+             + (ansible_failed_result.stderr_lines | default([])) }}
 
     - name: Fail the play after recording t10
       ansible.builtin.fail:

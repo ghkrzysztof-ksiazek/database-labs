@@ -8,13 +8,20 @@ metadata:
 spec:
   crVersion: "1.2.0"
   secretsName: verify-secrets
-  updateStrategy: SmartUpdate
+  # Not SmartUpdate: the CRD requires Orchestrator for SmartUpdate on an async
+  # cluster, and this throwaway verification cluster runs without Orchestrator.
+  updateStrategy: OnDelete
   upgradeOptions:
     apply: disabled
     versionServiceEndpoint: https://check.percona.com
+  # An async cluster normally must run Orchestrator and HAProxy. This one is a
+  # single node that exists only to restore into and replicate from, so both are
+  # waived deliberately.
   unsafeFlags:
     mysqlSize: true
+    orchestrator: true
     orchestratorSize: true
+    proxy: true
     proxySize: true
   mysql:
     clusterType: async

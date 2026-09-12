@@ -4,77 +4,85 @@
     t_start: "{{ lookup('pipe', 'date -u +%s') }}"
 
 - block:
-    - name: Gate on cluster health before t05
-      ansible.builtin.include_role:
-        name: test_common
-        tasks_from: health_gate.yml
+    - block:
+        - name: Gate on cluster health before t05
+          ansible.builtin.include_role:
+            name: test_common
+            tasks_from: health_gate.yml
 
-    - name: Note the scheduled backups that already exist
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLBackup
-        namespace: "{{ mysql_namespace }}"
-        label_selectors:
-          - percona.com/backup-type=cron
-      register: t05_before
+        - name: Save the actual backup schedule before testing
+          kubernetes.core.k8s_info:
+            kubeconfig: "{{ kubeconfig_path }}"
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQL
+            namespace: "{{ mysql_namespace }}"
+            name: "{{ mysql_cluster_name }}"
+          register: t05_cluster_before
 
-    - name: Remember their names
-      ansible.builtin.set_fact:
-        t05_seen_before: "{{ t05_before.resources | default([]) | map(attribute='metadata.name') | list }}"
+        - name: Preserve the prior backup schedule
+          ansible.builtin.set_fact:
+            t05_prior_schedule: "{{ t05_cluster_before.resources[0].spec.backup.schedule | default([]) }}"
 
-    - name: Patch the cluster to a fast backup schedule
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: patched
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQL
-        namespace: "{{ mysql_namespace }}"
-        name: "{{ mysql_cluster_name }}"
-        definition:
-          spec:
-            backup:
-              schedule:
-                - name: "{{ suite_schedule_name }}"
-                  schedule: "{{ suite_fast_schedule }}"
-                  keep: "{{ backup_keep }}"
-                  storageName: "{{ backup_storage_name }}"
-                  type: full
+        - name: Note the scheduled backups that already exist
+          kubernetes.core.k8s_info:
+            kubeconfig: "{{ kubeconfig_path }}"
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQLBackup
+            namespace: "{{ mysql_namespace }}"
+            label_selectors:
+              - percona.com/backup-type=cron
+          register: t05_before
 
-    - name: Wait for the cron to create and finish a new backup
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLBackup
-        namespace: "{{ mysql_namespace }}"
-        label_selectors:
-          - percona.com/backup-type=cron
-      register: t05_after
-      until: >-
-        (t05_after.resources | default([])
-          | rejectattr('metadata.name', 'in', t05_seen_before)
-          | selectattr('status.state', 'defined')
-          | selectattr('status.state', 'match', '(?i)^(succeeded|ready|done)$')
-          | list | length) >= 1
-      retries: 60
-      delay: 15
+        - name: Remember their names
+          ansible.builtin.set_fact:
+            t05_seen_before: "{{ t05_before.resources | default([]) | map(attribute='metadata.name') | list }}"
 
-    - name: Describe the new scheduled backup
-      ansible.builtin.set_fact:
-        t05_new: >-
-          {{ (t05_after.resources
-              | rejectattr('metadata.name', 'in', t05_seen_before)
-              | selectattr('status.state', 'defined')
-              | selectattr('status.state', 'match', '(?i)^(succeeded|ready|done)$')
-              | list | first) }}
+        - name: Patch the cluster to a fast backup schedule
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: patched
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQL
+            namespace: "{{ mysql_namespace }}"
+            name: "{{ mysql_cluster_name }}"
+            definition:
+              spec:
+                backup:
+                  schedule:
+                    - name: "{{ suite_schedule_name }}"
+                      schedule: "{{ suite_fast_schedule }}"
+                      keep: "{{ backup_keep }}"
+                      storageName: "{{ backup_storage_name }}"
+                      type: full
 
-    - name: Require the scheduled backup to be a real backup nobody asked for
-      ansible.builtin.assert:
-        that:
-          - t05_new.metadata.labels['percona.com/backup-type'] == 'cron'
-          - t05_new.metadata.labels['percona.com/backup-ancestor'] is search(suite_schedule_name)
-          - backup_bucket in (t05_new.status.destination | default(''))
-        fail_msg: "Scheduled backup looks wrong: {{ t05_new }}"
+        - name: Wait for a new successful backup of the exact cluster and schedule
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ role_path }}/files/watch.py"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+            NS: "{{ mysql_namespace }}"
+            CLUSTER: "{{ mysql_cluster_name }}"
+            SCHEDULE: "{{ suite_schedule_name }}"
+            SEEN: "{{ t05_seen_before | to_json }}"
+          register: t05_watch
+          changed_when: false
+
+      always:
+        - name: Restore the exact prior backup schedule
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: patched
+            api_version: ps.percona.com/v1
+            kind: PerconaServerMySQL
+            namespace: "{{ mysql_namespace }}"
+            name: "{{ mysql_cluster_name }}"
+            definition:
+              spec:
+                backup:
+                  schedule: "{{ t05_prior_schedule }}"
+          when: t05_prior_schedule is defined
 
     - name: Record t05 as passed
       ansible.builtin.include_role:
@@ -85,14 +93,7 @@
         scenario_title: Scheduled backup runs unattended
         scenario_status: passed
         scenario_started: "{{ t_start }}"
-        scenario_evidence:
-          - "SCHEDULE_PATCHED={{ suite_fast_schedule }} name={{ suite_schedule_name }}"
-          - "PRE_EXISTING_CRON_BACKUPS={{ t05_seen_before | length }}"
-          - "NEW_BACKUP={{ t05_new.metadata.name }}"
-          - "NEW_BACKUP_ANCESTOR={{ t05_new.metadata.labels['percona.com/backup-ancestor'] }}"
-          - "NEW_BACKUP_STATE={{ t05_new.status.state }}"
-          - "NEW_BACKUP_DESTINATION={{ t05_new.status.destination | default('n/a') }}"
-          - "NEW_BACKUP_COMPLETED={{ t05_new.status.completed | default('n/a') }}"
+        scenario_evidence: "{{ ['SCHEDULE_PATCHED=' ~ suite_fast_schedule ~ ' name=' ~ suite_schedule_name, 'PRE_EXISTING_CRON_BACKUPS=' ~ (t05_seen_before | length)] + t05_watch.stdout_lines }}"
 
   rescue:
     - name: Record t05 as failed
@@ -109,22 +110,3 @@
     - name: Fail the play after recording t05
       ansible.builtin.fail:
         msg: "t05 failed: {{ ansible_failed_result.msg | default('see above') }}"
-
-  always:
-    - name: Restore the shipped backup schedule
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig_path }}"
-        state: patched
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQL
-        namespace: "{{ mysql_namespace }}"
-        name: "{{ mysql_cluster_name }}"
-        definition:
-          spec:
-            backup:
-              schedule:
-                - name: hourly-full
-                  schedule: "{{ backup_schedule }}"
-                  keep: "{{ backup_keep }}"
-                  storageName: "{{ backup_storage_name }}"
-                  type: full

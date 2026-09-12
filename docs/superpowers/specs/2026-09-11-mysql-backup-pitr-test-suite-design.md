@@ -42,7 +42,7 @@ this spec:
   (the plain `1.2.0` tag is the operator, not the binlog server; `0.4.1` is the
   newest binlog-server build published for 1.2.0).
 - `PerconaServerMySQLRestore.spec.pitr` = `{type: date|gtid, date, gtid, force,
-  backupSource.binlogServer}`. `date` is RFC3339, e.g. `"2024-11-18T11:10:48Z"`.
+  backupSource.binlogServer}`. Live correction: this pinned binlog-server build requires UTC without a suffix, e.g. `"2024-11-18T11:10:48"`; the sample RFC3339 `Z` suffix is rejected.
 - `PerconaServerMySQLBackup.spec` = `{clusterName, storageName, type: full|incremental,
   incrementalBaseBackupName, sourcePod, containerOptions}`.
 - `PerconaServerMySQLRestore.spec.backupSource` = `{destination, compressed, storage}`,
@@ -119,7 +119,7 @@ table, then per-scenario detail with durations and evidence blocks.
 
 Failure policy: a scenario that fails records `status: failed` with its evidence,
 and the ordered run stops at that point rather than continuing on a damaged
-cluster. `make test-backups CONTINUE=1` runs the rest anyway.
+cluster. A failed run renders its partial report; there is no supported continue-on-error switch.
 
 ### Scenarios
 
@@ -131,9 +131,9 @@ destructive scenarios must not strand the lab.
 | 01 | On-demand full backup | `PerconaServerMySQLBackup` type `full` | reaches Succeeded; `status.destination` is the MinIO bucket; duration recorded |
 | 02 | Backup from a replica | same, with `sourcePod: lab-mysql-1` | succeeds; the backup pod ran against the replica; the primary served writes throughout |
 | 03 | Incremental on a full base | `type: incremental`, `incrementalBaseBackupName` = 01 | succeeds; its MinIO object is materially smaller than the full |
-| 04 | Storage contents | `mc ls --recursive` job against MinIO | backup prefix holds non-zero `xtrabackup.stream` and checksum objects; binlog bucket is receiving objects and growing |
-| 05 | Scheduled backup | patch `backup.schedule` to a short interval | an `xb-cron-*` backup object appears and reaches Succeeded without human action |
-| 06 | Retention (`keep`) | let N+1 scheduled runs complete with `keep: N` | oldest backup CR is gone and its MinIO prefix is gone with it |
+| 04 | Storage contents | `mc ls --recursive` job against MinIO | backup prefix holds nonzero XtraBackup chunks and MD5 metadata; controlled writes increase archived binlog bytes |
+| 05 | Scheduled backup | patch `backup.schedule` to a short interval | a `cron-*` backup object appears and reaches Succeeded without human action |
+| 06 | Retention (`keep`) | let N+1 scheduled runs complete with `keep: N` | oldest successful backup CR and data prefix are gone; residual MD5 sidecars are reported separately |
 | 07 | Restore in place | canary table created after the backup; restore 01 | restore Succeeded; canary absent; 10 sysbench tables and the expected data size return |
 | 08 | Disaster: dropped table | `DROP TABLE sbtest10`; restore | table returns with its full row count |
 | 09 | **PITR to a timestamp** | marker rows at t1, pause, marker rows at t2; restore with `pitr.type: date` targeting between them | restore Succeeded; t1 markers present, t2 markers absent |
@@ -239,3 +239,7 @@ Expected wall clock for a full pass: roughly 1.5–2 hours, dominated by restore
 Encryption at rest, cloud object stores, cross-region DR, incremental restore
 chains beyond scenario 03, and backup performance tuning. The lab is a
 correctness demonstration on a laptop, not a benchmark.
+
+## Live-run refinements
+
+The implementation plan continuation notes and lab documentation record the measured corrections: unique per-attempt PITR markers, a new archive prefix for each recovery history, GTID differences excluding inherited history, full S3 storage metadata for cross-cluster restore, and GTID/checksum verification followed by cleanup before PASS. These refine the original design without changing the infrastructure scope.

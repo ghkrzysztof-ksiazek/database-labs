@@ -13,16 +13,32 @@
     KUBECONFIG: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
   roles:
     - test_common
-    - t01_backup_full
-    - t02_backup_from_replica
-    - t03_backup_incremental
-    - t04_storage_contents
-    - t05_backup_scheduled
-    - t06_backup_retention
-    - t07_restore_in_place
-    - t08_restore_dropped_table
-    - t09_pitr_timestamp
-    - t10_pitr_gtid
-    - t11_pitr_invalid_target
-    - t12_restore_as_replica
-    - test_report
+  tasks:
+    - block:
+        - ansible.builtin.include_role:
+            name: t01_backup_full
+        - ansible.builtin.include_role:
+            name: t02_backup_from_replica
+        - ansible.builtin.include_role:
+            name: t03_backup_incremental
+        - ansible.builtin.include_role:
+            name: t04_storage_contents
+        - ansible.builtin.include_role:
+            name: t05_backup_scheduled
+        - ansible.builtin.include_role:
+            name: t06_backup_retention
+        - ansible.builtin.include_role:
+            name: t07_restore_in_place
+        - ansible.builtin.include_role:
+            name: t08_restore_dropped_table
+        - ansible.builtin.include_role:
+            name: t09_pitr_timestamp
+        - ansible.builtin.include_role:
+            name: t10_pitr_gtid
+        - ansible.builtin.include_role:
+            name: t11_pitr_invalid_target
+        - ansible.builtin.include_role:
+            name: t12_restore_as_replica
+      always:
+        - ansible.builtin.include_role:
+            name: test_report

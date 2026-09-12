@@ -1,0 +1,72 @@
+---
+# Restoring a base creates a new history. Do not replay abandoned transactions
+# retained in an archive from before that restore.
+- name: Allocate an archive prefix for this recovery timeline
+  ansible.builtin.set_fact:
+    recovery_binlog_prefix: "{{ binlog_prefix }}/{{ scenario_id }}-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%S') }}"
+
+- name: Remember the collector pod before changing its configuration
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    name: "{{ mysql_cluster_name }}-binlog-server-0"
+  register: timeline_old_pod
+
+- name: Switch the binlog collector to the new archive
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: patched
+    api_version: ps.percona.com/v1
+    kind: PerconaServerMySQL
+    namespace: "{{ mysql_namespace }}"
+    name: "{{ mysql_cluster_name }}"
+    definition:
+      spec:
+        backup:
+          pitr:
+            binlogServer:
+              storage:
+                s3:
+                  prefix: "{{ recovery_binlog_prefix }}"
+
+- name: Wait for the updated collector process and StatefulSet revision
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl --kubeconfig {{ kubeconfig_path | quote }} -n {{ mysql_namespace }} get sts {{ mysql_cluster_name }}-binlog-server -o json | python3 -c '
+    import json,sys
+    sts=json.load(sys.stdin)
+    status=sts.get("status",{})
+    assert status.get("observedGeneration",0) >= sts["metadata"]["generation"]
+    assert status.get("currentRevision") == status.get("updateRevision")
+    assert status.get("readyReplicas",0) == 1
+    '
+    kubectl --kubeconfig {{ kubeconfig_path | quote }} -n {{ mysql_namespace }} get pod {{ mysql_cluster_name }}-binlog-server-0 -o json | python3 -c '
+    import json,sys
+    pod=json.load(sys.stdin)
+    assert pod["metadata"]["uid"] != "{{ timeline_old_pod.resources[0].metadata.uid }}"
+    assert any(c["type"]=="Ready" and c["status"]=="True" for c in pod["status"].get("conditions",[]))
+    '
+  args:
+    executable: /bin/bash
+  register: timeline_rollout
+  changed_when: false
+  until: timeline_rollout.rc == 0
+  retries: 60
+  delay: 5
+
+- name: Wait for the binlog pod to use the new archive
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl --kubeconfig {{ kubeconfig_path | quote }} -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-binlog-server-0 -c binlog-server -- cat /etc/binlog_server/config/config.json | python3 -c '
+    import json,sys
+    config=json.load(sys.stdin)
+    assert "{{ recovery_binlog_prefix }}" in json.dumps(config), "archive prefix not yet updated"
+    '
+  args:
+    executable: /bin/bash
+  register: timeline_pod
+  changed_when: false
+  until: timeline_pod.rc == 0
+  retries: 60
+  delay: 5

@@ -9,6 +9,29 @@
         name: test_common
         tasks_from: health_gate.yml
 
+    - name: Read the active archive and snapshot the dataset before rejection
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} get ps {{ mysql_cluster_name }} -o jsonpath='{.spec.backup.pitr.binlogServer.storage.s3.prefix}'
+      args:
+        executable: /bin/bash
+      register: t11_prefix
+      changed_when: false
+
+    - name: Snapshot table checksums before the invalid request
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        for i in $(seq 1 {{ sysbench_tables }}); do
+          kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i"
+        done
+      args:
+        executable: /bin/bash
+      register: t11_before_checksums
+      changed_when: false
+      failed_when: t11_before_checksums.rc != 0 or 'NULL' in t11_before_checksums.stdout
+
     - name: Require a base backup to aim before
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig_path }}"
@@ -59,7 +82,7 @@
                       credentialsSecret: "{{ minio_credentials_secret }}"
                       endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
                       region: us-east-1
-                      prefix: "{{ binlog_prefix }}"
+                      prefix: "{{ t11_prefix.stdout | trim }}"
 
     - name: Wait for the operator to reject or fail the impossible restore
       kubernetes.core.k8s_info:
@@ -79,7 +102,8 @@
       ansible.builtin.assert:
         that:
           - (t11_rst.resources[0].status.state | default('') | lower) in ['failed', 'error']
-          - (t11_rst.resources[0].status.stateDescription | default('') | length) > 0
+          - t11_rst.resources[0].status.stateDescription is search('Timestamp is too old')
+          - "'Invalid timestamp format' not in t11_rst.resources[0].status.stateDescription"
         fail_msg: >-
           An impossible PITR target did not fail cleanly: {{ t11_rst.resources[0].status | default({}) }}
 
@@ -120,6 +144,19 @@
       delay: 15
       until: t11_after.rc == 0
 
+    - name: Compare table checksums after rejection
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        for i in $(seq 1 {{ sysbench_tables }}); do
+          kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i"
+        done
+      args:
+        executable: /bin/bash
+      register: t11_after_checksums
+      changed_when: false
+      failed_when: t11_after_checksums.rc != 0 or t11_after_checksums.stdout != t11_before_checksums.stdout
+
     - name: Require the dataset to have survived
       ansible.builtin.assert:
         that:
@@ -152,7 +189,10 @@
         scenario_title: An impossible recovery target fails cleanly
         scenario_status: failed
         scenario_started: "{{ t_start }}"
-        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+        scenario_evidence: >-
+          {{ [ansible_failed_result.msg | default('see play output') | string]
+             + (ansible_failed_result.stdout_lines | default([]))
+             + (ansible_failed_result.stderr_lines | default([])) }}
 
     - name: Fail the play after recording t11
       ansible.builtin.fail:

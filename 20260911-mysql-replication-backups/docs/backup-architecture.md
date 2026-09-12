@@ -24,7 +24,7 @@ The operator reacts by creating an `xb-<name>-<storage>-<hash>` Job running the 
 Three fields on `spec` are worth knowing:
 
 - **`type: incremental`** with **`incrementalBaseBackupName`** takes a backup of only the pages that changed since the named full backup.
-- **`sourcePod`** pins the backup to a specific pod. Pointing it at the replica keeps the read load, and XtraBackup's brief locking, away from the pod serving writes. Scenario `t02` does exactly this and checks the primary kept accepting writes throughout.
+- **`sourcePod`** pins the backup to a specific pod. Pointing it at the replica keeps the read load, and XtraBackup's brief locking, away from the pod serving writes. Scenario `t02` does exactly this and checks that the primary accepts a test write after requesting the backup.
 - **`storageName`** selects one of `spec.backup.storages` on the cluster — here, the MinIO entry.
 
 When the job finishes, the object's `status` carries the answer:
@@ -133,7 +133,7 @@ Two details cost time if you get them wrong:
   Probing `binlog_server search_by_timestamp` directly inside the binlog server pod settles it — of `2026-09-12T09:00:00Z`, `2026-09-12 09:00:00`, a Unix epoch, `2026-09-12T09:00:00+00:00` and `2026-09-12T09:00:00`, only the last is accepted. Take the value from the server with `SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s')`, never from the laptop's clock or timezone.
 - The **`serverId` of the restore-time binlog server must not collide** with the running one, or with any MySQL instance. The scenarios use 1011, 1012 and so on against a cluster binlog server at 1001.
 
-`type: gtid` targets a GTID set rather than a wall-clock instant, which is the precise tool when you know exactly which transaction did the damage: capture `@@GLOBAL.gtid_executed` before the bad statement and recover to it. Scenario `t10` does that around a `DELETE` with no `WHERE` clause.
+`type: gtid` targets a GTID set rather than a wall-clock instant, which is the precise tool when you know exactly which transaction did the damage: capture a baseline before the base backup, then use `GTID_SUBTRACT(@@GLOBAL.gtid_executed, baseline)` before the bad statement. This archive must cover the requested difference; older inherited transactions are already in the base. Scenario `t10` does that around a `DELETE` with no `WHERE` clause.
 
 Scenario `t11` asks for a target that cannot be satisfied — a timestamp years before any backup existed — to check the operator says so rather than quietly restoring the plain backup and reporting success. What it actually did is recorded in the run report.
 
@@ -191,4 +191,12 @@ Getting to `Seconds_Behind_Source: 0` proves four things at once that no green j
 
 Scenario `t12` runs exactly this, and deliberately keeps writing to the live cluster while the restore is in flight, so the restored copy has real ground to make up rather than arriving at an idle, unchanged source.
 
-This is also the cheapest way to get a verified backup in production: the restored copy doesn't have to be thrown away. A backup restored into a replica that then catches up *is* a standby. Verification and capacity are the same piece of work.
+In production, a verified restored copy may be retained as a standby after the appropriate operational checks. A backup restored into a replica that then catches up *is* a standby. Verification and capacity are the same piece of work.
+
+## Recovery histories and exact storage configuration
+
+After an in-place rollback, the old archive can contain transactions no longer in the live database. Replaying that archive into a later backup can resurrect discarded changes. t09 and t10 allocate separate archive prefixes before taking their bases; previous archives are retained for investigation. The live logs in the second shakeout showed this failure explicitly: marker assertions passed but an old DROP TABLE was replayed.
+
+For cross-cluster restore, preserve `backup.status.storage` alongside `status.destination`. In this lab that includes `s3.prefix: lab`. Supplying the bucket alone makes this operator search the wrong object prefix.
+
+The deployed v1.2.0 implementation is available in the [restore controller](https://github.com/percona/percona-server-mysql-operator/blob/v1.2.0/pkg/controller/psrestore/controller.go), [S3 option builder](https://github.com/percona/percona-server-mysql-operator/blob/v1.2.0/pkg/xtrabackup/storage/options.go), and [PITR replay code](https://github.com/percona/percona-server-mysql-operator/blob/v1.2.0/cmd/pitr/main.go). Version-specific behavior above is scoped to this lab build.

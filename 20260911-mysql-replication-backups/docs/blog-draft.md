@@ -1,129 +1,89 @@
-# Draft: A MySQL source–replica cluster on a laptop, with backups, failover, and Grafana
+# Test your MySQL backup by restoring it as a replica
 
-*Working notes for a blog post. Every count and log line below is from the lab in this repo (kind + Ansible) on 2026-09-10 — not invented.*
+A successful backup job establishes that the backup process completed. It does not establish that you can recover your database, resume replication, or meet a recovery-time objective. Those questions require a restore test.
 
-## Hook
+This lab makes that test concrete: restore a physical backup into a separate MySQL cluster, configure GTID replication from the live source, let it catch up, and compare the data. The existing source continues running. The verification cluster is disposable.
 
-You can run a **MySQL source plus replicas**, **Orchestrator failover**, **XtraBackup to MinIO**, and **Prometheus / Grafana** on a single Docker host. The installer is Ansible; the source of truth at runtime is Kubernetes.
+## The experiment
 
-## What we deployed
+The environment is a local kind cluster running Percona Operator for MySQL 1.2.0 and Percona Server 8.4. It retains the source and replica, HAProxy, Orchestrator, MinIO, Prometheus and Grafana from the replication lab. PITR adds a binlog server and a separate MinIO bucket. The dataset contains ten sysbench tables, each with 200,000 rows.
 
-- **kind** cluster `mysql-lab`: 1 control-plane + 2 workers
-- **Percona Operator for MySQL** Helm chart `1.2.0`
-- **Percona Server** `8.4.10-10`, async GTID replication, HAProxy in front
-- **sysbench** `oltp_read_write` prepare: **10 tables**, **200000 rows** each, **471–493 MB** InnoDB
-- **kube-prometheus-stack** `88.5.2` + `mysqld_exporter` sidecar, Prometheus job `mysql`
+Twelve Ansible scenarios test full backups, backups from a replica, incremental creation, stored objects, scheduling, retention, whole-cluster restore, a dropped table, timestamp PITR, GTID PITR, invalid targets, and restore into a new cluster followed by replication. The [catalogue](test-catalogue.md) describes the assertions and prerequisites. Measured evidence is recorded in [run reports](results/); interrupted and failed shakeouts remain distinguishable from final validation.
 
-Diagrams: [how-it-works.md](how-it-works.md). Layout and SQL: [cluster-and-data.md](cluster-and-data.md).
+The [second shakeout report](results/shakeout2-run.md) preserves the failures that led to these corrections. It is not a clean validation run.
 
-## One-liner path for the reader
+## Measured ordered run — 12 September 2026
+
+All twelve scenarios passed in one ordered run. The [generated report](results/20260912T101400Z-validation-run.md) contains the raw assertion evidence; development attempts are retained separately.
+
+| Scenario | Duration |
+| --- | --- |
+| t01 — On-demand full backup to MinIO | 27 s |
+| t02 — Backup taken from the replica, primary untouched | 14 s |
+| t03 — Incremental backup on a full base | 19 s |
+| t04 — Backup and binlog objects present in MinIO | 40 s |
+| t05 — Scheduled backup runs unattended | 207 s |
+| t06 — Retention prunes scheduled backups down to keep | 11 s |
+| t07 — Whole-cluster restore rolls back post-backup writes | 161 s |
+| t08 — Restore recovers a dropped table | 160 s |
+| t09 — Point-in-time recovery to a timestamp | 355 s |
+| t10 — Point-in-time recovery to a GTID | 336 s |
+| t11 — An impossible recovery target fails cleanly | 24 s |
+| t12 — Restore into a new cluster, attach as a replica, catch up | 118 s |
+
+Retention began with successful scheduled backups already present from earlier development runs; its duration measures pruning and verification, not creation of three fresh backups. The removed data prefix was empty, but its sibling MD5 sidecar remained and is recorded in the report.
+
+Total recorded scenario time: 1472 seconds. These are local-lab timings, including waits and checks, not a production benchmark.
+
+The separate-cluster restore took 65 seconds. Catch-up took 12 seconds and replayed a measured GTID gap of 100 transactions. The fresh 20,000-row marker was absent before replication and present afterward. Both replication threads were running, lag reached zero, and all ten tables had 200,000 rows with matching checksums. Cleanup left no verification pods or PVCs; the source and its original replica remained healthy.
+
+## The restore test that matters operationally
+
+The verification scenario takes a fresh full backup and records its destination and storage configuration. It creates a one-node `verify` cluster with the same credentials as the source, then restores from MinIO using `backupSource`. The source backup CR is not referenced by the restore request.
+
+Credentials matter because the physical backup contains the MySQL system tables. The new cluster must be able to authenticate against the restored accounts. The lab copies the source user secret and the operator-generated `internal-lab` secret into the verification cluster names. This is a local demonstration with intentionally simple credentials, not a production secret-management pattern.
+
+The storage prefix matters too. A destination such as `s3://mysql-lab-backups/lab/<backup>` is not enough when the explicit S3 storage definition omits `prefix: lab`. This operator uses that definition when locating the backup. The test preserves the storage metadata from the successful backup.
+
+After requesting the restore, the test writes a unique marker table with 20,000 rows to the live source. Those rows are newer than the backup. Before replication starts, the restored copy must not contain them.
+
+The restored instance must have a distinct server UUID and server ID. It is attached to the source with `CHANGE REPLICATION SOURCE TO`, `SOURCE_AUTO_POSITION=1` and the replication account. The test waits for both replication threads, a captured source GTID watermark, and the marker rows. Finally, it checks exact row counts and non-NULL checksums for all ten sysbench tables. Zero seconds of lag alone is not the acceptance criterion.
+
+The report records the restore and catch-up durations, the initial GTID gap, and the comparison evidence. Only after cleanup and a source health check does the scenario report success.
+
+## PITR needs the correct recovery history
+
+Timestamp recovery writes a unique good marker for this attempt, captures a UTC boundary, and writes a unique bad marker after it. The marker identity must be new; a base backup containing an old success marker cannot prove that this recovery replayed anything. GTID recovery records the inherited transaction set before its base backup, then captures the GTID difference up to the boundary before deleting the contents of a table. Recovery must retain the earlier data and exclude the later damage.
+
+The first shakeout uncovered a subtle problem: after an in-place restore, the old archive still contained transactions from the discarded history. A later timestamp recovery replayed an earlier test's `DROP TABLE`. Its markers were correct, but the database had only nine sysbench tables. Checking the whole dataset exposed what checking only marker rows would have missed.
+
+Each PITR scenario therefore starts a fresh archive prefix before taking its base backup. Old archives remain intact for investigation. This is explicit recovery-history management for a lab that repeatedly rewinds its source; an archive should not silently mix histories after a rollback.
+
+Two smaller integration details also surfaced. This binlog-server build accepts UTC timestamps as `YYYY-MM-DDTHH:MM:SS`, without a timezone suffix. The sample's `Z` suffix produced `Invalid timestamp format`. And the MySQL batch client escapes embedded newlines unless raw output is requested; an escaped multiline GTID set is not a valid recovery target. The harness captures raw GTIDs and removes actual line breaks. It requests the GTID difference for the current recovery history: asking a fresh archive to cover inherited GTIDs from an older backup produced `The specified GTID set cannot be covered`.
+
+## Test the test
+
+An expected failure must fail for the intended reason. The negative PITR scenario initially passed on a timestamp-format error. It now requires a range/search rejection and compares the dataset before and after the request.
+
+Retention needs a similar distinction. Seeing fewer backup CRs does not prove that storage was reclaimed. The test must remember the destinations it observed and check the pruned data prefixes in MinIO. Residual metadata should be reported separately instead of being silently described as full deletion.
+
+The incremental scenario tests creation and relative size. It does not establish that an incremental restore chain works. That would require its own restore-and-compare test.
+
+## Reproduce it
+
+From `20260911-mysql-replication-backups/`:
 
 ```bash
-./scripts/lab.sh bootstrap
 ./scripts/lab.sh deploy
 ./scripts/lab.sh load-data
-./scripts/lab.sh verify
+RUN_ID=my-validation ./scripts/lab.sh test-backups
+RUN_ID=my-validation ./scripts/lab.sh report
 ```
 
-`make deploy` PLAY RECAP: `ok=40 failed=0`. Grafana `http://127.0.0.1:3001/login` returned **200**. Prometheus `/-/ready` was ready.
+The suite is destructive to this local lab: several scenarios intentionally rewind the source. Run individual scenarios with `./scripts/lab.sh t01` through `t12`, observing the catalogue's backup prerequisites. Use `./scripts/lab.sh test` for the separate offline configuration checks.
 
-## Measured results
+The final checks also passed all 35 [offline tests](results/20260912T101400Z-validation-offline-tests.log) and the [cluster verification](results/20260912T101400Z-validation-health.log), including replica IO/SQL threads and Prometheus MySQL availability. The [environment snapshot](results/20260912T101400Z-validation-environment.json) records actual image digests, Kubernetes version and PITR archive configuration.
 
-### Dataset (`make load-data` then `make verify`)
+## What the evidence can establish
 
-`information_schema` after `ANALYZE TABLE`:
-
-```
-SYSBENCH_TABLES=10
-SIZE_MB=471
-```
-
-After backup/restore the same query reported `SIZE_MB=493` (ANALYZE + InnoDB stats). Row counts:
-
-```
-sbtest1  → 200000
-sbtest10 → 200000
-```
-
-Verify topology after scale-out:
-
-```
-POD lab-mysql-0 hostname=lab-mysql-0 read_only=0
-POD lab-mysql-1 hostname=lab-mysql-1 read_only=1 replica_io=ON replica_sql=ON
-POD lab-mysql-2 hostname=lab-mysql-2 read_only=1 replica_io=ON replica_sql=ON
-PRIMARY=lab-mysql-0
-REPLICA_OK=2
-SYSBENCH_TABLES=10
-SIZE_MB=493
-Prometheus mysql up ok
-```
-
-Prometheus `up{job="mysql"}` returned **1** for all three exporter sidecars (`lab-mysql-0`, `lab-mysql-1`, `lab-mysql-2`).
-
-### Failover (`make failover`)
-
-The current source was **force-deleted** (`kubectl delete pod --force --grace-period=0`) and Orchestrator `GET /api/recover/<host>/3306` was called. Recaptured `make failover` (`failed=0`):
-
-```
-PRIMARY_BEFORE=lab-mysql-2
-PRIMARY_AFTER=lab-mysql-0
-OLD_READ_ONLY=1
-OLD_REPLICA_IO=ON
-OLD_REPLICA_SQL=ON
-OLD_SOURCE_HOST=lab-mysql-0.lab-mysql.mysql
-FOLLOWER lab-mysql-1 read_only=1 replica_io=ON replica_sql=ON source=lab-mysql-0.lab-mysql.mysql
-FOLLOWER lab-mysql-2 read_only=1 replica_io=ON replica_sql=ON source=lab-mysql-0.lab-mysql.mysql
-FOLLOWERS_OK=2
-REJOIN_OK=1
-```
-
-The former source (`lab-mysql-2`) is Running, read-only, applying the new source's GTID stream. The remaining replica (`lab-mysql-1`) already followed `lab-mysql-0` before the old pod finished catching up.
-
-### Backup and whole-cluster restore (`make backup` / `make restore`)
-
-On-demand XtraBackup:
-
-```
-backupSource: lab-mysql-0.lab-mysql.mysql
-destination: s3://mysql-lab-backups/lab/lab-2026-09-10-19:19:11-full
-state: Succeeded
-```
-
-Restore playbook created `sbtest.canary_after_backup` **after** that backup, then applied `PerconaServerMySQLRestore` `lab-restore`. After restore:
-
-- canary table count **0** (the post-backup write is gone)
-- sysbench tables still **10**, size **493 MB**
-- cluster `state=ready`
-
-That is a whole-cluster restore: the operator paused MySQL, ran `xb-restore-lab-restore`, and brought both members back from the MinIO object.
-
-### Scale-out (`make scale-out`)
-
-`kubectl patch` `spec.mysql.size` **2 → 3**. After catch-up:
-
-```
-MYSQL_PODS=3
-POD lab-mysql-0 read_only=0 tables=10
-POD lab-mysql-1 read_only=1 tables=10 replica_io=ON replica_sql=ON
-POD lab-mysql-2 read_only=1 tables=10 replica_io=ON replica_sql=ON
-REPLICA_OK=2
-```
-
-CR status: `mysql.ready=3 size=3 state=ready`.
-
-## Pitfalls worth a sidebar
-
-- This operator's **async** topology is the one that matches binlog/GTID source–replica. The sibling PXC operator is Galera; do not substitute it.
-- Lab size 2 needs `unsafeFlags.mysqlSize` (the operator prefers 3). Orchestrator size 1 needs `unsafeFlags.orchestratorSize`.
-- Backups go to **MinIO** because XtraBackup wants S3-compatible storage, not a laptop AWS account.
-- `information_schema` sizes are **wrong until `ANALYZE TABLE`**. Without it, 10×200k rows looked like 109 MB; after ANALYZE they were ~471 MB.
-- `mysqld_exporter` v0.16 wants `MYSQLD_EXPORTER_PASSWORD` + `--mysqld.username`, not `DATA_SOURCE_NAME`.
-- Operator pod labels are `component=database` / `component=proxy`, not `mysql` / `haproxy`.
-- `SIGSTOP` on PID 1 did **not** freeze mysqld in this image; the shipped playbook force-deletes the source pod and waits for replica rejoin.
-- Host ports are **3307 / 3001 / 9091** so they do not clash with the ClickHouse lab on 3306/3000/9090.
-
-## Teardown
-
-```bash
-./scripts/lab.sh teardown
-```
+A restored replica that catches up and matches the source gives strong evidence that this backup and replication path work for the tested dataset. It does not replace application-level checks, production-scale timing, or testing other backup generations. Restore, catch up, verify, record the result, and repeat on a schedule. A backup schedule should have a matching restore-test schedule.

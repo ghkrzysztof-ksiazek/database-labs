@@ -2733,3 +2733,24 @@ git commit -m "Document the backup verification lab and its measured results"
 - `make test` is the offline structural suite and must stay fast. It never touches Kubernetes.
 - Tasks 1–8 are pure authoring and can be completed without a cluster. Task 9 is the first time anything runs for real, and it is where the plan expects to be corrected by reality.
 - When reality and the plan disagree, reality wins and the documentation records what reality said.
+
+
+## Continuation corrections — 2026-09-12
+
+The second shakeout is preserved as `docs/results/shakeout2.jsonl` and its generated report. It is a failed development run, not final validation.
+
+- Recover the source from t01 before further tests; the second timestamp run replayed DROP TABLE from an abandoned pre-restore history. Allocate a fresh binlog archive prefix before each new PITR base backup. Do not erase old archives.
+- Capture GTID output with MySQL `--batch --raw --skip-column-names`, then remove actual newlines. Escaped `\n` is not valid in a GTID set.
+- Restore-as-replica must preserve successful backup `status.storage`, including S3 prefix, not synthesize an incomplete storage definition.
+- t12 strengthens acceptance with unique post-backup markers, distinct server identities, a captured source GTID watermark, exact row counts, non-NULL checksums, restore/catch-up durations, initial GTID gap, and successful cleanup before PASS.
+- Quote replication `until` expressions containing colon-space; unquoted expressions can become YAML mappings.
+- t04 proves binlog byte growth after writes; t06 tracks successful CRs with set operations and checks deleted data prefixes. Report leftover MD5 sidecars explicitly. Restore the actual prior schedule.
+- t11 must fail for a range/search error, not an invalid timestamp syntax, and checks dataset checksums before and after rejection.
+- Always render a partial report on full-suite failure. Stop at the first failure; there is no supported CONTINUE switch.
+- Keep measured shakeout evidence, and distinguish it from the final ordered run. Incremental creation remains in scope; incremental-chain restore is explicitly untested.
+
+GTID followup: a fresh archive cannot cover inherited GTIDs from earlier physical restores. t10 captures an inherited baseline before its base backup and requests `GTID_SUBTRACT` through the good boundary. This agrees with the v1.2.0 upstream PITR e2e method and replay include-GTID semantics. The rejected full-set attempt remains in the targeted report.
+
+## Completion evidence
+
+Completed on 2026-09-12. `20260912T101400Z-validation` recorded twelve passing scenarios in order, 1,472 seconds of summed scenario time, no rescued/failed tasks. Final t12: restore 65 seconds, catch-up 12 seconds, 100 GTIDs replayed, 20,000 fresh marker rows, all ten tables at 200,000 rows and matching checksums, disposable resources removed. Final offline suite: 35 tests passed; all fourteen test/report playbooks syntax-checked; source verification passed including replication and Prometheus. Blog, catalogue, architecture, standalone Mermaid diagrams, failed-attempt evidence and final run report are delivered. Retention timing reused existing successful scheduled backups, and the remaining MD5 sidecar is explicitly recorded.

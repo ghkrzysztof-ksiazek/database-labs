@@ -1,0 +1,243 @@
+{
+  "captured_at": "2026-09-12T10:11:31.303681+00:00",
+  "kubernetes": {
+    "clientVersion": {
+      "major": "1",
+      "minor": "36",
+      "gitVersion": "v1.36.2",
+      "gitCommit": "24e2b02af5543d7910c2bb074c7264df5a8f0467",
+      "gitTreeState": "clean",
+      "buildDate": "2026-06-11T18:09:07Z",
+      "goVersion": "go1.26.4",
+      "compiler": "gc",
+      "platform": "darwin/arm64"
+    },
+    "kustomizeVersion": "v5.8.1",
+    "serverVersion": {
+      "major": "1",
+      "minor": "36",
+      "emulationMajor": "1",
+      "emulationMinor": "36",
+      "minCompatibilityMajor": "1",
+      "minCompatibilityMinor": "35",
+      "gitVersion": "v1.36.1",
+      "gitCommit": "756939600b9a7180fc2df6550a4585b638875e67",
+      "gitTreeState": "clean",
+      "buildDate": "2026-05-12T09:51:34Z",
+      "goVersion": "go1.26.2",
+      "compiler": "gc",
+      "platform": "linux/arm64"
+    }
+  },
+  "images": [
+    {
+      "namespace": "monitoring",
+      "pod": "kps-grafana-69fd86bb77-2dg4g",
+      "containers": [
+        {
+          "name": "grafana",
+          "image": "docker.io/grafana/grafana:13.2.0",
+          "imageID": "docker.io/grafana/grafana@sha256:3fd54ae1214669f8355f065ec9f6445d5279a3d77095ab048ca045685272429b"
+        },
+        {
+          "name": "grafana-sc-dashboard",
+          "image": "quay.io/kiwigrid/k8s-sidecar:2.10.1",
+          "imageID": "quay.io/kiwigrid/k8s-sidecar@sha256:7eac5c4fed714a18d038fc9fea57d8744d113367935dac0ea4eb6a87cef704a3"
+        },
+        {
+          "name": "grafana-sc-datasources",
+          "image": "quay.io/kiwigrid/k8s-sidecar:2.10.1",
+          "imageID": "quay.io/kiwigrid/k8s-sidecar@sha256:7eac5c4fed714a18d038fc9fea57d8744d113367935dac0ea4eb6a87cef704a3"
+        }
+      ]
+    },
+    {
+      "namespace": "monitoring",
+      "pod": "kps-kube-prometheus-stack-operator-7df8bcbbfb-qs8vl",
+      "containers": [
+        {
+          "name": "kube-prometheus-stack",
+          "image": "quay.io/prometheus-operator/prometheus-operator:v0.93.1",
+          "imageID": "quay.io/prometheus-operator/prometheus-operator@sha256:e52bb28fd41c98dd407c7a8cba8bdcfe7eabd7447e250afaf1fe7bb816dedbff"
+        }
+      ]
+    },
+    {
+      "namespace": "monitoring",
+      "pod": "kps-kube-state-metrics-659896646d-22glh",
+      "containers": [
+        {
+          "name": "kube-state-metrics",
+          "image": "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0",
+          "imageID": "registry.k8s.io/kube-state-metrics/kube-state-metrics@sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b"
+        }
+      ]
+    },
+    {
+      "namespace": "monitoring",
+      "pod": "kps-prometheus-node-exporter-4jrxh",
+      "containers": [
+        {
+          "name": "node-exporter",
+          "image": "quay.io/prometheus/node-exporter:v1.12.1-distroless",
+          "imageID": "quay.io/prometheus/node-exporter@sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106"
+        }
+      ]
+    },
+    {
+      "namespace": "monitoring",
+      "pod": "kps-prometheus-node-exporter-fqb2m",
+      "containers": [
+        {
+          "name": "node-exporter",
+          "image": "quay.io/prometheus/node-exporter:v1.12.1-distroless",
+          "imageID": "quay.io/prometheus/node-exporter@sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106"
+        }
+      ]
+    },
+    {
+      "namespace": "monitoring",
+      "pod": "kps-prometheus-node-exporter-xdc9d",
+      "containers": [
+        {
+          "name": "node-exporter",
+          "image": "quay.io/prometheus/node-exporter:v1.12.1-distroless",
+          "imageID": "quay.io/prometheus/node-exporter@sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106"
+        }
+      ]
+    },
+    {
+      "namespace": "monitoring",
+      "pod": "prometheus-kps-kube-prometheus-stack-prometheus-0",
+      "containers": [
+        {
+          "name": "config-reloader",
+          "image": "quay.io/prometheus-operator/prometheus-config-reloader:v0.93.1",
+          "imageID": "quay.io/prometheus-operator/prometheus-config-reloader@sha256:428f088fe6fe07ab138bda92113664b04848a1dc408e4d3680a60ecdb55d1a65"
+        },
+        {
+          "name": "prometheus",
+          "image": "quay.io/prometheus/prometheus:v3.14.0-distroless",
+          "imageID": "quay.io/prometheus/prometheus@sha256:50c707e96da5ade383cb1707790576480485e93de06aa60ad8802cb5f744bd0a"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "lab-binlog-server-0",
+      "containers": [
+        {
+          "name": "binlog-server",
+          "image": "docker.io/percona/percona-server-mysql-operator:1.2.0-binlog-server-0.4.1",
+          "imageID": "docker.io/percona/percona-server-mysql-operator@sha256:112fd5246493960863261301f26fe463a6378e4e5b5b506a6dc8cb023e60be0c"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "lab-haproxy-0",
+      "containers": [
+        {
+          "name": "haproxy",
+          "image": "docker.io/percona/haproxy:2.8.18-1",
+          "imageID": "docker.io/percona/haproxy@sha256:726b65930d86f7342eb6bce97a38b9af934c935345e4524afda6b65c2b3213b3"
+        },
+        {
+          "name": "mysql-monit",
+          "image": "docker.io/percona/haproxy:2.8.18-1",
+          "imageID": "docker.io/percona/haproxy@sha256:726b65930d86f7342eb6bce97a38b9af934c935345e4524afda6b65c2b3213b3"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "lab-mysql-0",
+      "containers": [
+        {
+          "name": "exporter",
+          "image": "docker.io/prom/mysqld-exporter:v0.16.0",
+          "imageID": "docker.io/prom/mysqld-exporter@sha256:617b7244a31922c30eeddb0e3b39b4c125e890d46179be4a30561b20f111ca6c"
+        },
+        {
+          "name": "mysql",
+          "image": "docker.io/percona/percona-server:8.4.10-10.1",
+          "imageID": "docker.io/percona/percona-server@sha256:01cf1439241e11c5d49312db1b18ee01a5947869c1a1dec18417d88ffaeb5717"
+        },
+        {
+          "name": "pt-heartbeat",
+          "image": "docker.io/percona/percona-toolkit:3.7.1-4",
+          "imageID": "docker.io/percona/percona-toolkit@sha256:9ed7a2025946ed326fb26fbfa45b49c81658be5bfe87a0ba5c34441df05e8dde"
+        },
+        {
+          "name": "xtrabackup",
+          "image": "docker.io/percona/percona-xtrabackup:8.4.0-6.1",
+          "imageID": "docker.io/percona/percona-xtrabackup@sha256:f4fc511cca67d1ba0aef6752c53bdd25383235cb58f1d28e570adbc4bb67d374"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "lab-mysql-1",
+      "containers": [
+        {
+          "name": "exporter",
+          "image": "docker.io/prom/mysqld-exporter:v0.16.0",
+          "imageID": "docker.io/prom/mysqld-exporter@sha256:617b7244a31922c30eeddb0e3b39b4c125e890d46179be4a30561b20f111ca6c"
+        },
+        {
+          "name": "mysql",
+          "image": "docker.io/percona/percona-server:8.4.10-10.1",
+          "imageID": "docker.io/percona/percona-server@sha256:01cf1439241e11c5d49312db1b18ee01a5947869c1a1dec18417d88ffaeb5717"
+        },
+        {
+          "name": "pt-heartbeat",
+          "image": "docker.io/percona/percona-toolkit:3.7.1-4",
+          "imageID": "docker.io/percona/percona-toolkit@sha256:9ed7a2025946ed326fb26fbfa45b49c81658be5bfe87a0ba5c34441df05e8dde"
+        },
+        {
+          "name": "xtrabackup",
+          "image": "docker.io/percona/percona-xtrabackup:8.4.0-6.1",
+          "imageID": "docker.io/percona/percona-xtrabackup@sha256:f4fc511cca67d1ba0aef6752c53bdd25383235cb58f1d28e570adbc4bb67d374"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "lab-orc-0",
+      "containers": [
+        {
+          "name": "mysql-monit",
+          "image": "docker.io/percona/percona-orchestrator:3.2.6-22",
+          "imageID": "docker.io/percona/percona-orchestrator@sha256:e201e547ab6c597e55a67c0542d0036feba66fd91472c125505b00bab128dddc"
+        },
+        {
+          "name": "orchestrator",
+          "image": "docker.io/percona/percona-orchestrator:3.2.6-22",
+          "imageID": "docker.io/percona/percona-orchestrator@sha256:e201e547ab6c597e55a67c0542d0036feba66fd91472c125505b00bab128dddc"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "minio-0",
+      "containers": [
+        {
+          "name": "minio",
+          "image": "quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z",
+          "imageID": "quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
+        }
+      ]
+    },
+    {
+      "namespace": "mysql",
+      "pod": "ps-operator-6675d84f9-pz7mj",
+      "containers": [
+        {
+          "name": "manager",
+          "image": "docker.io/percona/percona-server-mysql-operator:1.2.0",
+          "imageID": "docker.io/percona/percona-server-mysql-operator@sha256:28bfc38c1d4b642e860fda46aa7a964fc2de11a93a6dd05fcd7de4fd782982c8"
+        }
+      ]
+    }
+  ]
+}
