@@ -65,3 +65,7 @@ suite_fast_schedule: "*/3 * * * *"
 suite_fast_keep: 2
 
 pitr_settle_seconds: 120
+
+verify_cluster_name: verify
+verify_catchup_retries: 60
+verify_catchup_delay: 10

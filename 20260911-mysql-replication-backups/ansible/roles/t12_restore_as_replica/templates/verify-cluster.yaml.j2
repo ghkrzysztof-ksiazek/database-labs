@@ -1,0 +1,78 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQL
+metadata:
+  name: {{ verify_cluster_name }}
+  namespace: {{ mysql_namespace }}
+  finalizers:
+    - percona.com/delete-mysql-pods-in-order
+spec:
+  crVersion: "{{ ps_cr_version }}"
+  secretsName: {{ verify_cluster_name }}-secrets
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    versionServiceEndpoint: https://check.percona.com
+  unsafeFlags:
+    mysqlSize: true
+    orchestratorSize: true
+    proxySize: true
+  mysql:
+    clusterType: {{ mysql_cluster_type }}
+    autoRecovery: true
+    size: 1
+    image: {{ mysql_image }}
+    imagePullPolicy: IfNotPresent
+    gracePeriod: 30
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1024Mi
+    affinity:
+      antiAffinityTopologyKey: "none"
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 5Gi
+    configuration: |
+      [mysqld]
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      log_bin=ON
+      binlog_format=ROW
+      binlog_expire_logs_seconds=86400
+      innodb_buffer_pool_size=256M
+      max_connections=80
+      skip_name_resolve
+  proxy:
+    haproxy:
+      enabled: false
+      size: 1
+      image: {{ haproxy_image }}
+    router:
+      enabled: false
+      size: 1
+      image: percona/percona-mysql-router:8.4.10
+  orchestrator:
+    enabled: false
+    size: 1
+    image: {{ orchestrator_image }}
+  backup:
+    enabled: true
+    image: {{ xtrabackup_image }}
+    imagePullPolicy: IfNotPresent
+    storages:
+      {{ backup_storage_name }}:
+        type: s3
+        verifyTLS: false
+        s3:
+          bucket: {{ backup_bucket }}
+          credentialsSecret: {{ minio_credentials_secret }}
+          endpointUrl: http://minio.{{ mysql_namespace }}.svc.cluster.local:9000
+          region: us-east-1
+          prefix: {{ verify_cluster_name }}
+  toolkit:
+    image: {{ toolkit_image }}
+    imagePullPolicy: IfNotPresent

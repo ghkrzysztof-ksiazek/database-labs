@@ -253,7 +253,7 @@ class LabConfigTests(unittest.TestCase):
 
 
     def test_every_scenario_has_a_role_and_playbook(self) -> None:
-        for sid, slug in self.SCENARIOS[:11]:
+        for sid, slug in self.SCENARIOS:
             role = ANSIBLE / "roles" / f"{sid}_{slug.replace('-', '_')}" / "tasks" / "main.yml"
             play = PLAYBOOKS / "tests" / f"{sid}-{slug}.yml"
             self.assertTrue(role.is_file(), f"missing role tasks for {sid}")
@@ -305,6 +305,41 @@ class LabConfigTests(unittest.TestCase):
         t11 = (ANSIBLE / "roles" / "t11_pitr_invalid_target" / "tasks" / "main.yml").read_text()
         self.assertIn("failed", t11)
         self.assertIn("health_gate.yml", t11)
+
+
+    def test_restore_as_replica_is_a_real_verification(self) -> None:
+        v = load_group_vars()
+        self.assertEqual(v["verify_cluster_name"], "verify")
+        self.assertNotEqual(v["verify_cluster_name"], v["mysql_cluster_name"])
+
+        role = ANSIBLE / "roles" / "t12_restore_as_replica"
+        text = (role / "tasks" / "main.yml").read_text()
+        # restores from the object store, not from the source cluster's backup CR
+        self.assertIn("backupSource", text)
+        self.assertIn("destination", text)
+        # copies both the user secret and the operator's internal secret
+        self.assertIn("internal-", text)
+        self.assertIn("secretsName", (role / "templates" / "verify-cluster.yaml.j2").read_text())
+        # sets up replication and waits for catch-up
+        self.assertIn("CHANGE REPLICATION SOURCE TO", text)
+        self.assertIn("SOURCE_AUTO_POSITION", text)
+        self.assertIn("Seconds_Behind_Source", text)
+        self.assertIn("CHECKSUM TABLE", text)
+        # cleans up after itself
+        self.assertIn("always:", text)
+
+    def test_verify_cluster_template_is_a_minimal_single_node(self) -> None:
+        rendered = yaml.safe_load(
+            render_template(
+                ANSIBLE / "roles" / "t12_restore_as_replica" / "templates" / "verify-cluster.yaml.j2"
+            )
+        )
+        spec = rendered["spec"]
+        self.assertEqual(rendered["metadata"]["name"], "verify")
+        self.assertEqual(int(spec["mysql"]["size"]), 1)
+        self.assertFalse(spec["orchestrator"]["enabled"])
+        self.assertFalse(spec["proxy"]["haproxy"]["enabled"])
+        self.assertNotIn("pitr", spec["backup"])
 
 
 if __name__ == "__main__":
