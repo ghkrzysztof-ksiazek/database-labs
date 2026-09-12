@@ -253,7 +253,7 @@ class LabConfigTests(unittest.TestCase):
 
 
     def test_every_scenario_has_a_role_and_playbook(self) -> None:
-        for sid, slug in self.SCENARIOS[:6]:
+        for sid, slug in self.SCENARIOS[:8]:
             role = ANSIBLE / "roles" / f"{sid}_{slug.replace('-', '_')}" / "tasks" / "main.yml"
             play = PLAYBOOKS / "tests" / f"{sid}-{slug}.yml"
             self.assertTrue(role.is_file(), f"missing role tasks for {sid}")
@@ -282,6 +282,15 @@ class LabConfigTests(unittest.TestCase):
             self.assertIn("always:", text)
             self.assertIn("backup_schedule", text)
             self.assertIn("percona.com/backup-type", text)
+
+
+    def test_restore_scenarios_prove_rollback(self) -> None:
+        t07 = (ANSIBLE / "roles" / "t07_restore_in_place" / "tasks" / "main.yml").read_text()
+        self.assertIn("canary", t07)
+        self.assertIn("PerconaServerMySQLRestore", t07)
+        t08 = (ANSIBLE / "roles" / "t08_restore_dropped_table" / "tasks" / "main.yml").read_text()
+        self.assertIn("DROP TABLE", t08)
+        self.assertIn("sbtest10", t08)
 
 
 if __name__ == "__main__":

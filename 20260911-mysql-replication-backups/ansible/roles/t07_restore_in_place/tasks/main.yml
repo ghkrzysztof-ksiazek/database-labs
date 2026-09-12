@@ -1,0 +1,160 @@
+---
+- name: Start the t07 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t07
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Find the writable primary
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        for p in $(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort); do
+          ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+          if [ "$ro" = "0" ]; then echo "$p"; exit 0; fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: t07_primary
+      changed_when: false
+
+    - name: Create a canary that the backup cannot contain
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ t07_primary.stdout | trim }} -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.canary_after_backup (id INT PRIMARY KEY, note VARCHAR(64));
+           INSERT INTO {{ sysbench_database }}.canary_after_backup VALUES (1,'written after the backup')
+             ON DUPLICATE KEY UPDATE note=VALUES(note);
+           SELECT CONCAT('CANARY_BEFORE_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name='canary_after_backup';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t07_canary
+      changed_when: true
+
+    - name: Require the canary to exist before restoring
+      ansible.builtin.assert:
+        that:
+          - "'CANARY_BEFORE_RESTORE=1' in t07_canary.stdout"
+
+    - name: Remove any stale t07 restore object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t07-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Restore the full backup over the running cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t07-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            backupName: t01-full
+
+    - name: Wait for the restore to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t07-restore
+      register: t07_rst
+      until:
+        - t07_rst.resources | length == 1
+        - (t07_rst.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 160
+      delay: 15
+
+    - name: Require the restore to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t07_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "Restore failed: {{ t07_rst.resources[0].status | default({}) }}"
+
+    - name: Gate on cluster health after the restore
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Measure the restored dataset
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('RESTORED_TABLES=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+           SELECT CONCAT('RESTORED_SIZE_MB=', IFNULL(ROUND(SUM(data_length+index_length)/1024/1024),0))
+             FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}';
+           SELECT CONCAT('CANARY_AFTER_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name='canary_after_backup';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t07_after
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: t07_after.rc == 0
+
+    - name: Require the dataset back and the canary gone
+      ansible.builtin.assert:
+        that:
+          - ('RESTORED_TABLES=' ~ sysbench_tables) in t07_after.stdout
+          - "'CANARY_AFTER_RESTORE=0' in t07_after.stdout"
+          - (t07_after.stdout_lines | select('match', '^RESTORED_SIZE_MB=') | first).split('=')[1] | int
+            >= (data_size_min_mb | int)
+        fail_msg: "Restore did not roll the cluster back: {{ t07_after.stdout }}"
+
+    - name: Record t07 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t07
+        scenario_title: Whole-cluster restore rolls back post-backup writes
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: >-
+          {{ ['PRIMARY=' ~ (t07_primary.stdout | trim)]
+             + t07_canary.stdout_lines
+             + ['RESTORE_BACKUP=t01-full']
+             + ['RESTORE_STATE=' ~ t07_rst.resources[0].status.state]
+             + t07_after.stdout_lines
+             + ['HEALTH=' ~ health_summary] }}
+
+  rescue:
+    - name: Record t07 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t07
+        scenario_title: Whole-cluster restore rolls back post-backup writes
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t07
+      ansible.builtin.fail:
+        msg: "t07 failed: {{ ansible_failed_result.msg | default('see above') }}"

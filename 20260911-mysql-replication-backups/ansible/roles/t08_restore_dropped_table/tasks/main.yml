@@ -1,0 +1,165 @@
+---
+- name: Start the t08 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t08
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Find the writable primary
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        for p in $(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort); do
+          ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+          if [ "$ro" = "0" ]; then echo "$p"; exit 0; fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: t08_primary
+      changed_when: false
+
+    - name: Record sbtest10 before dropping it
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ t08_primary.stdout | trim }} -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('ROWS_BEFORE_DROP=', COUNT(*)) FROM {{ sysbench_database }}.sbtest10;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t08_before
+      changed_when: false
+
+    - name: Drop the table, as a tired human would at 02:00
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ t08_primary.stdout | trim }} -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "DROP TABLE {{ sysbench_database }}.sbtest10;
+           SELECT CONCAT('TABLES_AFTER_DROP=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t08_drop
+      changed_when: true
+
+    - name: Require the table to actually be gone
+      ansible.builtin.assert:
+        that:
+          - ('TABLES_AFTER_DROP=' ~ ((sysbench_tables | int) - 1)) in t08_drop.stdout
+
+    - name: Remove any stale t08 restore object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t08-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Restore the cluster to recover the dropped table
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t08-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            backupName: t01-full
+
+    - name: Wait for the restore to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t08-restore
+      register: t08_rst
+      until:
+        - t08_rst.resources | length == 1
+        - (t08_rst.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 160
+      delay: 15
+
+    - name: Require the restore to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t08_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "Restore failed: {{ t08_rst.resources[0].status | default({}) }}"
+
+    - name: Gate on cluster health after the restore
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Look for the table again
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('TABLES_AFTER_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+           SELECT CONCAT('ROWS_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.sbtest10;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t08_after
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: t08_after.rc == 0
+
+    - name: Require sbtest10 back with its rows
+      ansible.builtin.assert:
+        that:
+          - ('TABLES_AFTER_RESTORE=' ~ sysbench_tables) in t08_after.stdout
+          - (t08_after.stdout_lines | select('match', '^ROWS_AFTER_RESTORE=') | first).split('=')[1] | int
+            == (t08_before.stdout_lines | select('match', '^ROWS_BEFORE_DROP=') | first).split('=')[1] | int
+        fail_msg: "Dropped table did not come back intact: {{ t08_after.stdout }}"
+
+    - name: Record t08 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t08
+        scenario_title: Restore recovers a dropped table
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: >-
+          {{ t08_before.stdout_lines
+             + t08_drop.stdout_lines
+             + ['RESTORE_STATE=' ~ t08_rst.resources[0].status.state]
+             + t08_after.stdout_lines
+             + ['HEALTH=' ~ health_summary] }}
+
+  rescue:
+    - name: Record t08 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t08
+        scenario_title: Restore recovers a dropped table
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t08
+      ansible.builtin.fail:
+        msg: "t08 failed: {{ ansible_failed_result.msg | default('see above') }}"
