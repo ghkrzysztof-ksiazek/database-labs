@@ -11,7 +11,6 @@ ps_cr_version: "1.2.0"
 mysql_cluster_name: lab
 mysql_cluster_type: async
 mysql_size: 2
-mysql_scale_out_size: 3
 orchestrator_enabled: true
 
 mysql_image: "percona/percona-server:8.4.10-10.1"

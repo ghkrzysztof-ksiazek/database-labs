@@ -28,23 +28,17 @@ case "$cmd" in
   verify)
     (cd ansible && "$ANSIBLE" playbooks/verify.yml "$@")
     ;;
-  failover)
-    (cd ansible && "$ANSIBLE" playbooks/failover.yml "$@")
-    ;;
   backup)
     (cd ansible && "$ANSIBLE" playbooks/backup.yml "$@")
     ;;
   restore)
     (cd ansible && "$ANSIBLE" playbooks/restore.yml "$@")
     ;;
-  scale-out)
-    (cd ansible && "$ANSIBLE" playbooks/scale-out.yml "$@")
-    ;;
   teardown)
     (cd ansible && "$ANSIBLE" playbooks/teardown.yml "$@")
     ;;
   *)
-    echo "Usage: $0 {bootstrap|test|deploy|load-data|verify|failover|backup|restore|scale-out|teardown}"
+    echo "Usage: $0 {bootstrap|test|deploy|load-data|verify|backup|restore|teardown}"
     exit 1
     ;;
 esac

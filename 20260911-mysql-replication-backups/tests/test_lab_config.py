@@ -57,7 +57,6 @@ class LabConfigTests(unittest.TestCase):
         v = load_group_vars()
         self.assertEqual(v["mysql_cluster_type"], "async")
         self.assertGreaterEqual(int(v["mysql_size"]), 2)
-        self.assertGreater(int(v["mysql_scale_out_size"]), int(v["mysql_size"]))
         self.assertTrue(v["orchestrator_enabled"])
         self.assertNotIn("galera", str(v).lower())
         self.assertNotIn("wsrep", str(v).lower())
@@ -152,10 +151,8 @@ class LabConfigTests(unittest.TestCase):
             "load-data.yml",
             "verify.yml",
             "teardown.yml",
-            "failover.yml",
             "backup.yml",
             "restore.yml",
-            "scale-out.yml",
         ):
             path = PLAYBOOKS / name
             self.assertTrue(path.is_file(), f"missing playbook {name}")
@@ -168,45 +165,28 @@ class LabConfigTests(unittest.TestCase):
         self.assertIn("10", verify)
         self.assertIn("Prometheus", verify + verify.lower())
 
+    def test_failover_and_scale_out_are_gone(self) -> None:
+        for gone in (
+            PLAYBOOKS / "failover.yml",
+            PLAYBOOKS / "scale-out.yml",
+            ANSIBLE / "roles" / "failover_test",
+            ANSIBLE / "roles" / "scale_out",
+            ROOT / "docs" / "cluster-and-data.md",
+        ):
+            self.assertFalse(gone.exists(), f"{gone} should have been removed")
+
+        makefile = (ROOT / "Makefile").read_text()
+        lab_sh = (ROOT / "scripts" / "lab.sh").read_text()
+        for word in ("failover", "scale-out", "scale_out"):
+            self.assertNotIn(word, makefile)
+            self.assertNotIn(word, lab_sh)
+
     def test_lab_entrypoints_and_repo_index(self) -> None:
         makefile = (ROOT / "Makefile").read_text()
-        for target in (
-            "deploy",
-            "load-data",
-            "verify",
-            "failover",
-            "backup",
-            "restore",
-            "scale-out",
-        ):
+        for target in ("deploy", "load-data", "verify", "backup", "restore", "teardown"):
             self.assertIn(target, makefile)
-        lab_sh = (ROOT / "scripts" / "lab.sh").read_text()
-        self.assertIn("failover", lab_sh)
-        self.assertIn("scale-out", lab_sh)
         index = REPO_README.read_text()
-        self.assertIn("20260910-mysql-replication-setup", index)
-
-    def test_failover_role_requires_replica_rejoin_after_force_delete(self) -> None:
-        text = (ANSIBLE / "roles" / "failover_test" / "tasks" / "main.yml").read_text()
-        self.assertIn("--grace-period=0", text)
-        self.assertIn("/api/recover/", text)
-        self.assertNotIn("SIGSTOP", text)
-        self.assertIn("OLD_READ_ONLY", text)
-        self.assertIn("OLD_REPLICA_IO", text)
-        self.assertIn("OLD_SOURCE_HOST", text)
-        self.assertIn("REJOIN_OK", text)
-        # The rejoin wait must fail the play if the former source does not follow.
-        self.assertNotRegex(
-            text,
-            r"Wait for the former source pod to be recreated[\s\S]*failed_when:\s*false",
-        )
-
-    def test_docs_describe_force_delete_failover_not_sigstop(self) -> None:
-        readme = (ROOT / "README.md").read_text()
-        how = (ROOT / "docs" / "how-it-works.md").read_text()
-        self.assertIn("force-delete", readme.lower() + how.lower())
-        self.assertNotIn("SIGSTOP", readme)
-        self.assertNotIn("SIGSTOP", how)
+        self.assertIn("20260911-mysql-replication-backups", index)
 
 
 if __name__ == "__main__":

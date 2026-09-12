@@ -1,4 +1,4 @@
-.PHONY: bootstrap deploy load-data verify failover backup restore scale-out teardown test
+.PHONY: bootstrap deploy load-data verify backup restore teardown test
 
 VENV := .venv
 ANSIBLE := $(VENV)/bin/ansible-playbook
@@ -23,17 +23,11 @@ load-data:
 verify:
 	cd ansible && ../$(ANSIBLE) playbooks/verify.yml
 
-failover:
-	cd ansible && ../$(ANSIBLE) playbooks/failover.yml
-
 backup:
 	cd ansible && ../$(ANSIBLE) playbooks/backup.yml
 
 restore:
 	cd ansible && ../$(ANSIBLE) playbooks/restore.yml
-
-scale-out:
-	cd ansible && ../$(ANSIBLE) playbooks/scale-out.yml
 
 teardown:
 	cd ansible && ../$(ANSIBLE) playbooks/teardown.yml

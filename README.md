@@ -14,7 +14,7 @@ Each experiment lives in its own dated directory (`YYYYMMDD-name`).
 | --- | --- | --- |
 | [20260909-clickhouse-setup](20260909-clickhouse-setup/) | Replicated ClickHouse cluster (1 shard × 2 replicas) with a 3-node Keeper ensemble, the Altinity operator, NYC taxi sample data, and Prometheus alerts routed to Slack | [ClickHouse – a replicated cluster on your laptop with kind and Ansible](https://db-ex.eu/blog/clickhouse-a-replicated-cluster-on-your-laptop-with-kind-and-ansible/) |
 | [20260910-mysql-replication-setup](20260910-mysql-replication-setup/) | MySQL source–replica cluster on the Percona ps-operator: async GTID replication, Orchestrator failover, XtraBackup to in-cluster MinIO, canary-verified restore, and scale-out | [MySQL – a replication lab with failover, backups, and scale-out on Kubernetes](https://db-ex.eu/blog/mysql-replication-lab-failover-backups-and-scale-out-on-kubernetes/) |
-| [20260911-mysql-replication-backups](20260911-mysql-replication-backups/) | Work in progress. Currently an unmodified copy of the 20260910 lab, kept as the starting point for backup, restore, and point-in-time recovery work | — |
+| [20260911-mysql-replication-backups](20260911-mysql-replication-backups/) | MySQL backup verification lab: XtraBackup full/incremental/replica-sourced backups to MinIO, scheduled backups and retention, in-place restore, point-in-time recovery to a timestamp and to a GTID, and a restore into a separate cluster that attaches as a replica and catches up | — |
 
 ## Running a lab
 
