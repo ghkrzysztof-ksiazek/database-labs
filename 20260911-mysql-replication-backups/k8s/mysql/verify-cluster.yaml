@@ -1,0 +1,78 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQL
+metadata:
+  name: verify
+  namespace: mysql
+  finalizers:
+    - percona.com/delete-mysql-pods-in-order
+spec:
+  crVersion: "1.2.0"
+  secretsName: verify-secrets
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    versionServiceEndpoint: https://check.percona.com
+  unsafeFlags:
+    mysqlSize: true
+    orchestratorSize: true
+    proxySize: true
+  mysql:
+    clusterType: async
+    autoRecovery: true
+    size: 1
+    image: percona/percona-server:8.4.10-10.1
+    imagePullPolicy: IfNotPresent
+    gracePeriod: 30
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1024Mi
+    affinity:
+      antiAffinityTopologyKey: "none"
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 5Gi
+    configuration: |
+      [mysqld]
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      log_bin=ON
+      binlog_format=ROW
+      binlog_expire_logs_seconds=86400
+      innodb_buffer_pool_size=256M
+      max_connections=80
+      skip_name_resolve
+  proxy:
+    haproxy:
+      enabled: false
+      size: 1
+      image: percona/haproxy:2.8.18-1
+    router:
+      enabled: false
+      size: 1
+      image: percona/percona-mysql-router:8.4.10
+  orchestrator:
+    enabled: false
+    size: 1
+    image: percona/percona-orchestrator:3.2.6-22
+  backup:
+    enabled: true
+    image: percona/percona-xtrabackup:8.4.0-6.1
+    imagePullPolicy: IfNotPresent
+    storages:
+      minio:
+        type: s3
+        verifyTLS: false
+        s3:
+          bucket: mysql-lab-backups
+          credentialsSecret: minio-backup-credentials
+          endpointUrl: http://minio.mysql.svc.cluster.local:9000
+          region: us-east-1
+          prefix: verify
+  toolkit:
+    image: percona/percona-toolkit:3.7.1-4
+    imagePullPolicy: IfNotPresent

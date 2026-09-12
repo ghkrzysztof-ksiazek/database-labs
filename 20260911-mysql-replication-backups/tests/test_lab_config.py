@@ -342,5 +342,39 @@ class LabConfigTests(unittest.TestCase):
         self.assertNotIn("pitr", spec["backup"])
 
 
+    def test_docs_are_about_backup_verification(self) -> None:
+        readme = (ROOT / "README.md").read_text()
+        arch = (ROOT / "docs" / "backup-architecture.md").read_text()
+        catalogue = (ROOT / "docs" / "test-catalogue.md").read_text()
+        blog = (ROOT / "docs" / "blog-draft.md").read_text()
+
+        self.assertFalse((ROOT / "docs" / "how-it-works.md").exists())
+        self.assertIn("20260911-mysql-replication-backups", readme)
+        self.assertNotIn("20260910-mysql-replication-setup/", readme)
+
+        for doc in (readme, arch, catalogue, blog):
+            self.assertIn("PITR", doc + doc.upper())
+
+        for sid, _ in self.SCENARIOS:
+            self.assertIn(sid, catalogue, f"{sid} missing from the catalogue")
+            self.assertIn(f"lab.sh {sid}", catalogue)
+
+        for doc in (readme, blog):
+            self.assertIn("replica", doc.lower())
+        self.assertIn("binlog server", arch.lower())
+        self.assertIn("internal-", arch)
+
+        results = sorted((ROOT / "docs" / "results").glob("*-run.md"))
+        self.assertTrue(results, "no measured run report in docs/results/")
+        self.assertIn(results[-1].name, blog + catalogue + readme)
+
+    def test_docs_have_no_placeholders(self) -> None:
+        for name in ("README.md", "docs/backup-architecture.md",
+                     "docs/test-catalogue.md", "docs/blog-draft.md"):
+            text = (ROOT / name).read_text()
+            for bad in ("TODO", "TBD", "XXX", "<fill", "PLACEHOLDER", "Lorem"):
+                self.assertNotIn(bad, text, f"{name} still contains {bad}")
+
+
 if __name__ == "__main__":
     unittest.main()

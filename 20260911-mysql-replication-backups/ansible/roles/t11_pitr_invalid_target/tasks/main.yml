@@ -45,11 +45,14 @@
             backupName: t09-base
             pitr:
               type: date
-              date: "2001-01-01T00:00:00Z"
+              date: "2001-01-01T00:00:00"
               backupSource:
                 binlogServer:
                   image: "{{ binlog_server_image }}"
-                  serverId: "{{ binlog_server_id | int + 12 }}"
+                  # A literal int: the CRD types serverId as integer, and a
+                  # templated "{{ }}" reaches the API server as a string.
+                  # Must not collide with the cluster binlog server (1001).
+                  serverId: 1013
                   storage:
                     s3:
                       bucket: "{{ binlog_bucket }}"
@@ -133,7 +136,7 @@
         scenario_status: passed
         scenario_started: "{{ t_start }}"
         scenario_evidence: >-
-          {{ ['PITR_TYPE=date', 'PITR_TARGET=2001-01-01T00:00:00Z (before any backup existed)']
+          {{ ['PITR_TYPE=date', 'PITR_TARGET=2001-01-01T00:00:00 (valid format, before any backup or binlog existed)']
              + ['RESTORE_STATE=' ~ t11_state]
              + ['RESTORE_REASON=' ~ t11_reason]
              + t11_after.stdout_lines

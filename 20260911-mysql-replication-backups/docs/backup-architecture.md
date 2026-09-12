@@ -111,7 +111,7 @@ spec:
   backupName: t09-base
   pitr:
     type: date                       # or: gtid
-    date: "2026-09-12T09:14:05Z"     # RFC3339, UTC, Z-suffixed
+    date: "2026-09-12T09:14:05"      # NOT RFC3339 — see below
     # gtid: "f3c2...:1-4172"
     backupSource:
       binlogServer:
@@ -123,7 +123,14 @@ spec:
 
 Two details cost time if you get them wrong:
 
-- The **date format is RFC3339 in UTC**. Take it from the server (`SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%sZ')`), not from the laptop — the laptop's clock and timezone are not necessarily the server's.
+- The **date format is `YYYY-MM-DDTHH:MM:SS` in UTC, with no timezone suffix** — and Percona's own sample `restore.yaml` gets this wrong. It shows `date: "2024-11-18T11:10:48Z"`, and that `Z` makes the restore fail:
+
+  ```
+  reconcile pitr config: search binlogs: exec binlog_server search_by_timestamp:
+  {"version":1,"status":"error","message":"Invalid timestamp format"}
+  ```
+
+  Probing `binlog_server search_by_timestamp` directly inside the binlog server pod settles it — of `2026-09-12T09:00:00Z`, `2026-09-12 09:00:00`, a Unix epoch, `2026-09-12T09:00:00+00:00` and `2026-09-12T09:00:00`, only the last is accepted. Take the value from the server with `SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s')`, never from the laptop's clock or timezone.
 - The **`serverId` of the restore-time binlog server must not collide** with the running one, or with any MySQL instance. The scenarios use 1011, 1012 and so on against a cluster binlog server at 1001.
 
 `type: gtid` targets a GTID set rather than a wall-clock instant, which is the precise tool when you know exactly which transaction did the damage: capture `@@GLOBAL.gtid_executed` before the bad statement and recover to it. Scenario `t10` does that around a `DELETE` with no `WHERE` clause.

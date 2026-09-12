@@ -15,7 +15,7 @@
 - All paths below are relative to `20260911-mysql-replication-backups/` unless stated otherwise. That directory is the working directory for every command.
 - Infrastructure stays as it is: kind cluster `mysql-lab`, namespace `mysql`, cluster name `lab`, `mysql_size: 2` (one source + one replica), HAProxy, Orchestrator, MinIO, kube-prometheus-stack. The only infrastructure change in this plan is enabling PITR.
 - Binlog server image is exactly `percona/percona-server-mysql-operator:1.2.0-binlog-server-0.4.1`. The plain `1.2.0` tag is the operator, not the binlog server.
-- Restore PITR `date` values are RFC3339 UTC with a `Z` suffix, e.g. `2026-09-11T20:14:05Z`. Capture them with `SELECT UTC_TIMESTAMP()` on the server and reformat, never from the laptop clock.
+- Restore PITR `date` values are `YYYY-MM-DDTHH:MM:SS` in UTC with **no** timezone suffix, e.g. `2026-09-11T20:14:05`. Corrected during the live run: the `Z`-suffixed RFC3339 form in Percona's own sample CR is rejected by `binlog_server search_by_timestamp` as "Invalid timestamp format". Capture the value with `SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s')` on the server, never from the laptop clock.
 - Restore PITR `type` is one of `date` or `gtid` — no other value validates.
 - Backup CR names must be DNS-1123 labels: lowercase alphanumerics and `-`.
 - Results are written to `docs/results/<run_id>.jsonl` and `docs/results/<run_id>-run.md`, where `run_id` is a UTC stamp like `20260911T201405Z`.

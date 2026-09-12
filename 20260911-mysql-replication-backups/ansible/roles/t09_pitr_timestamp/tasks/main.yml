@@ -85,7 +85,10 @@
         q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('good', UTC_TIMESTAMP(6))"
         echo "GOOD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='good'")"
         sleep 20
-        echo "PITR_TARGET=$(q "SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%sZ')")"
+        # No Z suffix and no offset. search_by_timestamp in the binlog server
+        # rejects 2026-09-12T09:00:00Z as an invalid timestamp format, even
+        # though the upstream sample CR shows exactly that. Times are UTC.
+        echo "PITR_TARGET=$(q "SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s')")"
         sleep 20
         q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('bad', UTC_TIMESTAMP(6))"
         echo "BAD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad'")"
@@ -134,7 +137,10 @@
               backupSource:
                 binlogServer:
                   image: "{{ binlog_server_image }}"
-                  serverId: "{{ binlog_server_id | int + 10 }}"
+                  # A literal int: the CRD types serverId as integer, and a
+                  # templated "{{ }}" reaches the API server as a string.
+                  # Must not collide with the cluster binlog server (1001).
+                  serverId: 1011
                   storage:
                     s3:
                       bucket: "{{ binlog_bucket }}"

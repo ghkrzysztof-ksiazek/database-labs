@@ -133,7 +133,10 @@
               backupSource:
                 binlogServer:
                   image: "{{ binlog_server_image }}"
-                  serverId: "{{ binlog_server_id | int + 11 }}"
+                  # A literal int: the CRD types serverId as integer, and a
+                  # templated "{{ }}" reaches the API server as a string.
+                  # Must not collide with the cluster binlog server (1001).
+                  serverId: 1012
                   storage:
                     s3:
                       bucket: "{{ binlog_bucket }}"
