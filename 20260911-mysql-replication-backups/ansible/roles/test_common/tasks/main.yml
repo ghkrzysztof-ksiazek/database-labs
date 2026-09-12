@@ -1,0 +1,6 @@
+---
+# test_common ships shared includes (health_gate.yml, record_result.yml, mc.yml)
+# and the results defaults. Listing it as a role only announces the run.
+- name: Announce the run
+  ansible.builtin.debug:
+    msg: "run_id={{ run_id }} results={{ results_file }}"

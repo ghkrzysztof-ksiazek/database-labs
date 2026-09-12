@@ -1,0 +1,17 @@
+---
+# Runs `mc_args` in a throwaway minio/mc pod with the `local` alias configured.
+# Callers pass: mc_args, e.g. "mc ls --recursive local/mysql-lab-backups"
+- name: "mc: {{ mc_args }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_path }}"
+    kubectl -n {{ mysql_namespace }} run mc-$RANDOM --rm -i --restart=Never --quiet \
+      --image={{ minio_mc_image }} --command -- sh -c \
+      'mc alias set local http://minio:9000 {{ minio_root_user }} {{ minio_root_password }} >/dev/null 2>&1; {{ mc_args }}'
+  args:
+    executable: /bin/bash
+  register: mc_out
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: mc_out.rc == 0

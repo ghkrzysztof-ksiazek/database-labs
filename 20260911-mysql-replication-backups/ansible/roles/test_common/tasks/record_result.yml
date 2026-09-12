@@ -1,0 +1,32 @@
+---
+# Appends one JSON object per scenario to docs/results/<run_id>.jsonl.
+# Callers pass: scenario_id, scenario_title, scenario_status,
+# scenario_started (epoch seconds), scenario_evidence (list of strings).
+- name: Ensure the results directory exists
+  ansible.builtin.file:
+    path: "{{ results_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Append the scenario result
+  ansible.builtin.lineinfile:
+    path: "{{ results_file }}"
+    create: true
+    mode: "0644"
+    insertafter: EOF
+    line: >-
+      {{
+        {
+          'scenario': scenario_id,
+          'title': scenario_title,
+          'status': scenario_status,
+          'started': scenario_started | int,
+          'finished': (lookup('pipe', 'date -u +%s') | int),
+          'duration_seconds': ((lookup('pipe', 'date -u +%s') | int) - (scenario_started | int)),
+          'evidence': scenario_evidence | default([]),
+        } | to_json
+      }}
+
+- name: Show the scenario verdict
+  ansible.builtin.debug:
+    msg: "{{ scenario_id }} {{ scenario_status | upper }} — {{ scenario_title }}"

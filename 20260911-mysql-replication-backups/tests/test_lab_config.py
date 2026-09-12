@@ -53,6 +53,21 @@ def render_template(path: pathlib.Path, extra: dict | None = None) -> str:
 
 
 class LabConfigTests(unittest.TestCase):
+    SCENARIOS = (
+        ("t01", "backup-full"),
+        ("t02", "backup-from-replica"),
+        ("t03", "backup-incremental"),
+        ("t04", "storage-contents"),
+        ("t05", "backup-scheduled"),
+        ("t06", "backup-retention"),
+        ("t07", "restore-in-place"),
+        ("t08", "restore-dropped-table"),
+        ("t09", "pitr-timestamp"),
+        ("t10", "pitr-gtid"),
+        ("t11", "pitr-invalid-target"),
+        ("t12", "restore-as-replica"),
+    )
+
     def test_group_vars_define_async_source_replica_topology(self) -> None:
         v = load_group_vars()
         self.assertEqual(v["mysql_cluster_type"], "async")
@@ -215,6 +230,26 @@ class LabConfigTests(unittest.TestCase):
         text = (ANSIBLE / "roles" / "minio" / "tasks" / "main.yml").read_text()
         self.assertIn("binlog_bucket", text)
         self.assertIn("backup_bucket", text)
+
+
+    def test_test_harness_is_wired(self) -> None:
+        common = ANSIBLE / "roles" / "test_common" / "tasks"
+        self.assertTrue((common / "health_gate.yml").is_file())
+        self.assertTrue((common / "record_result.yml").is_file())
+        record = (common / "record_result.yml").read_text()
+        self.assertIn("scenario_id", record)
+        self.assertIn("scenario_status", record)
+        self.assertIn("scenario_evidence", record)
+        self.assertIn(".jsonl", record)
+
+        all_yml = (PLAYBOOKS / "tests" / "all.yml").read_text()
+        makefile = (ROOT / "Makefile").read_text()
+        lab_sh = (ROOT / "scripts" / "lab.sh").read_text()
+        self.assertIn("test-backups", makefile)
+        self.assertIn("test-backups", lab_sh)
+        for sid, _ in self.SCENARIOS:
+            self.assertIn(sid, all_yml, f"{sid} missing from the ordered run")
+            self.assertIn(f"test-{sid}", makefile, f"make test-{sid} missing")
 
 
 if __name__ == "__main__":

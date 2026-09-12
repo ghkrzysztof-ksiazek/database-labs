@@ -1,0 +1,65 @@
+---
+# Asserts the lab is usable. Included before and after every scenario so a
+# scenario that damages the cluster fails loudly instead of poisoning the next.
+- name: Wait for MySQL pods to be Running
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ mysql_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/instance={{ mysql_cluster_name }}
+      - app.kubernetes.io/component=database
+  register: health_pods
+  until:
+    - health_pods.resources | length >= (mysql_size | int)
+    - health_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+  retries: "{{ health_timeout_retries }}"
+  delay: "{{ health_timeout_delay }}"
+
+- name: Collect primary and replica state
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_path }}"
+    NS="{{ mysql_namespace }}"
+    pods=$(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)
+    primary=""
+    replica_ok=0
+    for p in $pods; do
+      ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+      if [ "$ro" = "0" ]; then
+        primary="$p"
+      else
+        io=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT SERVICE_STATE FROM performance_schema.replication_connection_status LIMIT 1" 2>/dev/null | tr -d '\r')
+        sql=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT SERVICE_STATE FROM performance_schema.replication_applier_status LIMIT 1" 2>/dev/null | tr -d '\r')
+        if [ "$io" = "ON" ] && [ "$sql" = "ON" ]; then
+          replica_ok=$((replica_ok+1))
+        fi
+      fi
+    done
+    echo "PRIMARY=$primary"
+    echo "REPLICA_OK=$replica_ok"
+    bs=$(kubectl -n "$NS" get pods -l app.kubernetes.io/component=binlog-server \
+      -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null | tr '\n' ' ')
+    echo "BINLOG_SERVER=${bs:-none}"
+  args:
+    executable: /bin/bash
+  register: health_out
+  changed_when: false
+  retries: 10
+  delay: 15
+  until: health_out.rc == 0
+
+- name: Require a writable primary and healthy replicas
+  ansible.builtin.assert:
+    that:
+      - health_out.stdout is search('PRIMARY=' ~ mysql_cluster_name)
+      - (health_out.stdout_lines | select('match', '^REPLICA_OK=') | first).split('=')[1] | int
+        >= ((mysql_size | int) - 1)
+    fail_msg: "Cluster is not healthy: {{ health_out.stdout }}"
+
+- name: Publish the health summary
+  ansible.builtin.set_fact:
+    health_summary: "{{ health_out.stdout_lines | join(' | ') }}"

@@ -1,0 +1,27 @@
+---
+# Ordered backup/restore/PITR suite. Order is load-bearing: every restore
+# needs a good backup behind it, and destructive scenarios must not strand
+# the lab. Run with: ./scripts/lab.sh test-backups
+- name: MySQL backup, restore and PITR suite
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  roles:
+    - test_common
+    - t01_backup_full
+    - t02_backup_from_replica
+    - t03_backup_incremental
+    - t04_storage_contents
+    - t05_backup_scheduled
+    - t06_backup_retention
+    - t07_restore_in_place
+    - t08_restore_dropped_table
+    - t09_pitr_timestamp
+    - t10_pitr_gtid
+    - t11_pitr_invalid_target
+    - t12_restore_as_replica
+    - test_report

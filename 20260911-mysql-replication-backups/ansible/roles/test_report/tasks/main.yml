@@ -1,0 +1,24 @@
+---
+- name: Read the run results
+  ansible.builtin.slurp:
+    src: "{{ results_file }}"
+  register: results_raw
+
+- name: Parse the run results
+  ansible.builtin.set_fact:
+    results: >-
+      {{ (results_raw.content | b64decode).splitlines()
+         | select('match', '^\s*\{')
+         | map('from_json') | list }}
+
+- name: Render the run report
+  ansible.builtin.template:
+    src: run.md.j2
+    dest: "{{ results_dir }}/{{ run_id }}-run.md"
+    mode: "0644"
+
+- name: Show where the report landed
+  ansible.builtin.debug:
+    msg: >-
+      {{ results | selectattr('status', 'equalto', 'passed') | list | length }}/{{ results | length }}
+      scenarios passed — {{ results_dir }}/{{ run_id }}-run.md

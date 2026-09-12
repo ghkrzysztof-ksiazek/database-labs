@@ -1,0 +1,6 @@
+---
+run_id: manual
+results_dir: "{{ repo_root }}/docs/results"
+results_file: "{{ results_dir }}/{{ run_id }}.jsonl"
+health_timeout_retries: 60
+health_timeout_delay: 10

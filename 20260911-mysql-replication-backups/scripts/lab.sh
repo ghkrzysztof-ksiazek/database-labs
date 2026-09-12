@@ -34,11 +34,21 @@ case "$cmd" in
   restore)
     (cd ansible && "$ANSIBLE" playbooks/restore.yml "$@")
     ;;
+  test-backups)
+    (cd ansible && "$ANSIBLE" playbooks/tests/all.yml -e run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}" "$@")
+    ;;
+  report)
+    (cd ansible && "$ANSIBLE" playbooks/tests/report.yml -e run_id="${RUN_ID:?set RUN_ID}" "$@")
+    ;;
+  t0[1-9]|t1[0-2])
+    playbook=$(basename "$(ls ansible/playbooks/tests/${cmd}-*.yml | head -1)")
+    (cd ansible && "$ANSIBLE" "playbooks/tests/$playbook" -e run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}" "$@")
+    ;;
   teardown)
     (cd ansible && "$ANSIBLE" playbooks/teardown.yml "$@")
     ;;
   *)
-    echo "Usage: $0 {bootstrap|test|deploy|load-data|verify|backup|restore|teardown}"
+    echo "Usage: $0 {bootstrap|test|deploy|load-data|verify|backup|restore|test-backups|t01..t12|report|teardown}"
     exit 1
     ;;
 esac
