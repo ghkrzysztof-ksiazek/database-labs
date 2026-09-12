@@ -1050,7 +1050,8 @@ Three scenarios that prove the backups exist as objects, that the operator's cro
 
 **Interfaces:**
 - Consumes: `mc.yml`, `health_gate.yml`, `record_result.yml`; the backup objects from Task 4.
-- Produces: vars `suite_fast_schedule: "*/3 * * * *"`, `suite_fast_keep: 2`, `suite_schedule_name: suite-fast`. Scenarios 05 and 06 both patch `spec.backup.schedule` to a single fast entry and restore the shipped schedule in an `always` block.
+- Produces: vars `suite_fast_schedule: "*/3 * * * *"`, `suite_fast_keep: 2`, `suite_schedule_name: suite-fast`.
+- Corrected against the live cluster during implementation: scheduled backup **CRs** are named `cron-<cluster>-<storage>-<stamp>-<hash>` (the `xb-cron-*` names belong to the pods), and they carry labels `percona.com/backup-type: cron` and `percona.com/backup-ancestor: <hash>-<schedule name>`. Selection uses those labels, not name prefixes. Destinations look like `s3://mysql-lab-backups/lab/lab-2026-09-11-11:15:18-full`. Scenarios 05 and 06 both patch `spec.backup.schedule` to a single fast entry and restore the shipped schedule in an `always` block.
 
 - [ ] **Step 1: Write the failing structural test**
 
@@ -1065,7 +1066,7 @@ Extend the Task 4 test to cover the first six scenarios and add:
             text = (ANSIBLE / "roles" / sid / "tasks" / "main.yml").read_text()
             self.assertIn("always:", text)
             self.assertIn("backup_schedule", text)
-            self.assertIn("xb-cron", text)
+            self.assertIn("percona.com/backup-type", text)
 ```
 
 Change `self.SCENARIOS[:3]` to `self.SCENARIOS[:6]` in `test_every_scenario_has_a_role_and_playbook`.

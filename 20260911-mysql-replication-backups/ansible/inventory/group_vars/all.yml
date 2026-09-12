@@ -59,3 +59,7 @@ binlog_server_image: "percona/percona-server-mysql-operator:1.2.0-binlog-server-
 binlog_checkpoint_interval: 30s
 binlog_checkpoint_size: 16M
 binlog_server_id: 1001
+
+suite_schedule_name: suite-fast
+suite_fast_schedule: "*/3 * * * *"
+suite_fast_keep: 2

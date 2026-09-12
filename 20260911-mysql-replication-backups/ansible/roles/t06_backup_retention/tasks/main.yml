@@ -1,0 +1,142 @@
+---
+- name: Start the t06 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t06
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Patch the cluster to a fast schedule that keeps only a few backups
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: patched
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQL
+        namespace: "{{ mysql_namespace }}"
+        name: "{{ mysql_cluster_name }}"
+        definition:
+          spec:
+            backup:
+              schedule:
+                - name: "{{ suite_schedule_name }}"
+                  schedule: "{{ suite_fast_schedule }}"
+                  keep: "{{ suite_fast_keep }}"
+                  storageName: "{{ backup_storage_name }}"
+                  type: full
+
+    - name: Wait for the cron to produce more backups than keep allows
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        label_selectors:
+          - percona.com/backup-type=cron
+      register: t06_cron
+      until: >-
+        (t06_cron.resources | default([])
+          | selectattr('metadata.labels', 'defined')
+          | selectattr('metadata.labels["percona.com/backup-ancestor"]', 'search', suite_schedule_name)
+          | list | length) >= ((suite_fast_keep | int) + 1)
+      retries: 80
+      delay: 15
+
+    - name: Remember every scheduled backup seen before pruning
+      ansible.builtin.set_fact:
+        t06_seen: >-
+          {{ t06_cron.resources
+             | selectattr('metadata.labels["percona.com/backup-ancestor"]', 'search', suite_schedule_name)
+             | map(attribute='metadata.name') | list }}
+
+    - name: Give the operator a pruning cycle
+      ansible.builtin.pause:
+        seconds: 200
+
+    - name: Count what survived
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        label_selectors:
+          - percona.com/backup-type=cron
+      register: t06_final
+
+    - name: Name the survivors
+      ansible.builtin.set_fact:
+        t06_surviving: >-
+          {{ t06_final.resources | default([])
+             | selectattr('metadata.labels["percona.com/backup-ancestor"]', 'search', suite_schedule_name)
+             | map(attribute='metadata.name') | list }}
+
+    - name: List the backup bucket after pruning
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: mc.yml
+      vars:
+        mc_args: "mc ls local/{{ backup_bucket }}/{{ mysql_cluster_name }}"
+
+    - name: Require retention to have pruned down to keep
+      ansible.builtin.assert:
+        that:
+          - (t06_seen | length) > (suite_fast_keep | int)
+          - (t06_surviving | length) <= (suite_fast_keep | int)
+          - (t06_seen | difference(t06_surviving) | length) > 0
+        fail_msg: >-
+          Retention did not prune: keep={{ suite_fast_keep }}
+          seen={{ t06_seen }} surviving={{ t06_surviving }}
+
+    - name: Record t06 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t06
+        scenario_title: Retention prunes scheduled backups down to keep
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: >-
+          {{ ['KEEP=' ~ suite_fast_keep, 'SCHEDULE=' ~ suite_fast_schedule]
+             + ['PRODUCED=' ~ (t06_seen | length) ~ ' ' ~ (t06_seen | join(','))]
+             + ['SURVIVING=' ~ (t06_surviving | length) ~ ' ' ~ (t06_surviving | join(','))]
+             + ['PRUNED=' ~ (t06_seen | difference(t06_surviving) | join(','))]
+             + ['--- ' ~ backup_bucket ~ '/' ~ mysql_cluster_name ~ ' ---']
+             + mc_out.stdout_lines }}
+
+  rescue:
+    - name: Record t06 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t06
+        scenario_title: Retention prunes scheduled backups down to keep
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t06
+      ansible.builtin.fail:
+        msg: "t06 failed: {{ ansible_failed_result.msg | default('see above') }}"
+
+  always:
+    - name: Restore the shipped backup schedule
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: patched
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQL
+        namespace: "{{ mysql_namespace }}"
+        name: "{{ mysql_cluster_name }}"
+        definition:
+          spec:
+            backup:
+              schedule:
+                - name: hourly-full
+                  schedule: "{{ backup_schedule }}"
+                  keep: "{{ backup_keep }}"
+                  storageName: "{{ backup_storage_name }}"
+                  type: full

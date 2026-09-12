@@ -253,7 +253,7 @@ class LabConfigTests(unittest.TestCase):
 
 
     def test_every_scenario_has_a_role_and_playbook(self) -> None:
-        for sid, slug in self.SCENARIOS[:3]:
+        for sid, slug in self.SCENARIOS[:6]:
             role = ANSIBLE / "roles" / f"{sid}_{slug.replace('-', '_')}" / "tasks" / "main.yml"
             play = PLAYBOOKS / "tests" / f"{sid}-{slug}.yml"
             self.assertTrue(role.is_file(), f"missing role tasks for {sid}")
@@ -271,6 +271,17 @@ class LabConfigTests(unittest.TestCase):
         t03 = (ANSIBLE / "roles" / "t03_backup_incremental" / "tasks" / "main.yml").read_text()
         self.assertIn("type: incremental", t03)
         self.assertIn("incrementalBaseBackupName", t03)
+
+
+    def test_schedule_scenarios_restore_the_shipped_schedule(self) -> None:
+        v = load_group_vars()
+        self.assertEqual(v["suite_schedule_name"], "suite-fast")
+        self.assertEqual(int(v["suite_fast_keep"]), 2)
+        for sid in ("t05_backup_scheduled", "t06_backup_retention"):
+            text = (ANSIBLE / "roles" / sid / "tasks" / "main.yml").read_text()
+            self.assertIn("always:", text)
+            self.assertIn("backup_schedule", text)
+            self.assertIn("percona.com/backup-type", text)
 
 
 if __name__ == "__main__":

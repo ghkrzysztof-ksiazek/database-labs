@@ -1,0 +1,12 @@
+---
+- name: "t04 — backup and binlog objects in MinIO"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  roles:
+    - test_common
+    - t04_storage_contents

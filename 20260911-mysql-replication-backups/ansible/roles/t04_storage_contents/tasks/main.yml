@@ -1,0 +1,76 @@
+---
+- name: Start the t04 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t04
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: List the backup bucket
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: mc.yml
+      vars:
+        mc_args: "mc ls --recursive local/{{ backup_bucket }}"
+
+    - name: Keep the backup listing
+      ansible.builtin.set_fact:
+        t04_backup_ls: "{{ mc_out.stdout_lines }}"
+
+    - name: Count binlog objects, wait a checkpoint window, count again
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: mc.yml
+      vars:
+        mc_args: >-
+          mc ls --recursive local/{{ binlog_bucket }} | wc -l | tr -d ' ';
+          sleep 90;
+          mc ls --recursive local/{{ binlog_bucket }} | wc -l | tr -d ' ';
+          mc ls --recursive local/{{ binlog_bucket }} | tail -5
+
+    - name: Keep the binlog listing
+      ansible.builtin.set_fact:
+        t04_binlog_ls: "{{ mc_out.stdout_lines }}"
+
+    - name: Require real backup objects and a live binlog stream
+      ansible.builtin.assert:
+        that:
+          - t04_backup_ls | select('search', 'xtrabackup') | list | length > 0
+          - t04_backup_ls | select('search', ' 0B ') | list | length == 0
+          - (t04_binlog_ls | select('match', '^[0-9]+$') | list | first | int) > 0
+          - (t04_binlog_ls | select('match', '^[0-9]+$') | list | last | int)
+            >= (t04_binlog_ls | select('match', '^[0-9]+$') | list | first | int)
+        fail_msg: >-
+          Storage does not look right. backups={{ t04_backup_ls }} binlogs={{ t04_binlog_ls }}
+
+    - name: Record t04 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t04
+        scenario_title: Backup and binlog objects present in MinIO
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: >-
+          {{ ['--- ' ~ backup_bucket ~ ' ---'] + t04_backup_ls
+             + ['--- ' ~ binlog_bucket ~ ' (count, +90s count, last objects) ---'] + t04_binlog_ls }}
+
+  rescue:
+    - name: Record t04 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t04
+        scenario_title: Backup and binlog objects present in MinIO
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t04
+      ansible.builtin.fail:
+        msg: "t04 failed: {{ ansible_failed_result.msg | default('see above') }}"
