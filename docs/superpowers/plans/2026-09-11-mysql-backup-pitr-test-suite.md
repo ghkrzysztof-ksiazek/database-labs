@@ -658,3 +658,2077 @@ git commit -m "Add the backup test harness: result recording, health gate, repor
 ```
 
 ---
+
+### Task 4: Scenarios 01–03 — the backup family
+
+Three scenarios that prove backups are *produced*: a full backup, a backup taken from the replica rather than the primary, and an incremental backup on top of the full. This task also establishes the scenario role shape every later task copies.
+
+**Files:**
+- Create: `ansible/roles/test_common/tasks/mc.yml`
+- Create: `ansible/roles/t01_backup_full/tasks/main.yml`, `ansible/playbooks/tests/t01-backup-full.yml`
+- Create: `ansible/roles/t02_backup_from_replica/tasks/main.yml`, `ansible/playbooks/tests/t02-backup-from-replica.yml`
+- Create: `ansible/roles/t03_backup_incremental/tasks/main.yml`, `ansible/playbooks/tests/t03-backup-incremental.yml`
+- Test: `tests/test_lab_config.py`
+
+**Interfaces:**
+- Consumes: `test_common/tasks/health_gate.yml`, `test_common/tasks/record_result.yml` (Task 3).
+- Produces:
+  - `test_common/tasks/mc.yml` — include with `vars: mc_args: "<shell using the mc binary>"`; runs it in a throwaway `minio/mc` pod with alias `local` already set, registers `mc_out`.
+  - Backup objects named `t01-full`, `t02-replica`, `t03-incr` left in the namespace. Task 5 scenario 04 reads their `status.destination`; Task 8 scenario 12 takes its own backup and does not depend on these.
+  - The scenario role shape: `set_fact t_start` → `block` (health gate, work, asserts, record passed) → `rescue` (record failed, re-fail).
+
+- [ ] **Step 1: Write the failing structural test**
+
+Add to `tests/test_lab_config.py`:
+
+```python
+    def test_every_scenario_has_a_role_and_playbook(self) -> None:
+        for sid, slug in self.SCENARIOS[:3]:
+            role = ANSIBLE / "roles" / f"{sid}_{slug.replace('-', '_')}" / "tasks" / "main.yml"
+            play = PLAYBOOKS / "tests" / f"{sid}-{slug}.yml"
+            self.assertTrue(role.is_file(), f"missing role tasks for {sid}")
+            self.assertTrue(play.is_file(), f"missing playbook for {sid}")
+            text = role.read_text()
+            self.assertIn("record_result.yml", text)
+            self.assertIn("rescue", text)
+            self.assertIn(f"scenario_id: {sid}", text)
+
+    def test_backup_scenarios_cover_full_replica_and_incremental(self) -> None:
+        t01 = (ANSIBLE / "roles" / "t01_backup_full" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: full", t01)
+        t02 = (ANSIBLE / "roles" / "t02_backup_from_replica" / "tasks" / "main.yml").read_text()
+        self.assertIn("sourcePod", t02)
+        t03 = (ANSIBLE / "roles" / "t03_backup_incremental" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: incremental", t03)
+        self.assertIn("incrementalBaseBackupName", t03)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make test`
+Expected: FAIL — missing role tasks for t01.
+
+- [ ] **Step 3: Write the mc helper**
+
+`ansible/roles/test_common/tasks/mc.yml`:
+
+```yaml
+---
+# Runs `mc_args` in a throwaway minio/mc pod with the `local` alias configured.
+# Callers pass: mc_args, e.g. "mc ls --recursive local/mysql-lab-backups"
+- name: "mc: {{ mc_args }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="{{ kubeconfig_path }}"
+    kubectl -n {{ mysql_namespace }} run mc-$RANDOM --rm -i --restart=Never --quiet \
+      --image={{ minio_mc_image }} --command -- sh -c \
+      'mc alias set local http://minio:9000 {{ minio_root_user }} {{ minio_root_password }} >/dev/null 2>&1; {{ mc_args }}'
+  args:
+    executable: /bin/bash
+  register: mc_out
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: mc_out.rc == 0
+```
+
+- [ ] **Step 4: Write the t01 role**
+
+`ansible/roles/t01_backup_full/tasks/main.yml`:
+
+```yaml
+---
+- name: Start the t01 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t01
+      ansible.builtin.include_tasks: ../../test_common/tasks/health_gate.yml
+
+    - name: Remove any stale t01 backup object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t01-full
+        wait: true
+        wait_timeout: 180
+
+    - name: Record the dataset the backup will capture
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('TABLES=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+           SELECT CONCAT('SIZE_MB=', IFNULL(ROUND(SUM(data_length+index_length)/1024/1024),0))
+             FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}';
+           SELECT CONCAT('GTID_AT_BACKUP=', @@GLOBAL.gtid_executed);" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: pre
+      changed_when: false
+
+    - name: Request a full backup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLBackup
+          metadata:
+            name: t01-full
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: full
+
+    - name: Wait for the full backup to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t01-full
+      register: t01_bkp
+      until:
+        - t01_bkp.resources | length == 1
+        - (t01_bkp.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 120
+      delay: 10
+
+    - name: Require the full backup to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t01_bkp.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+          - t01_bkp.resources[0].status.destination | default('') | length > 0
+          - backup_bucket in t01_bkp.resources[0].status.destination
+        fail_msg: "Full backup did not succeed: {{ t01_bkp.resources[0].status | default({}) }}"
+
+    - name: Measure the backup in MinIO
+      ansible.builtin.include_tasks: ../../test_common/tasks/mc.yml
+      vars:
+        mc_args: "mc du local/{{ backup_bucket }}/{{ mysql_cluster_name }} 2>/dev/null | tail -1"
+
+    - name: Assemble the t01 evidence
+      ansible.builtin.set_fact:
+        t01_evidence: >-
+          {{ pre.stdout_lines
+             + ['BACKUP_STATE=' ~ t01_bkp.resources[0].status.state]
+             + ['BACKUP_TYPE=' ~ (t01_bkp.resources[0].status.type | default('full'))]
+             + ['BACKUP_DESTINATION=' ~ t01_bkp.resources[0].status.destination]
+             + ['BACKUP_COMPLETED=' ~ (t01_bkp.resources[0].status.completed | default('n/a'))]
+             + ['MINIO_USAGE=' ~ (mc_out.stdout | trim)] }}
+
+    - name: Record t01 as passed
+      ansible.builtin.include_tasks: ../../test_common/tasks/record_result.yml
+      vars:
+        scenario_id: t01
+        scenario_title: On-demand full backup to MinIO
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ t01_evidence }}"
+
+  rescue:
+    - name: Record t01 as failed
+      ansible.builtin.include_tasks: ../../test_common/tasks/record_result.yml
+      vars:
+        scenario_id: t01
+        scenario_title: On-demand full backup to MinIO
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t01
+      ansible.builtin.fail:
+        msg: "t01 failed: {{ ansible_failed_result.msg | default('see above') }}"
+```
+
+Note the relative `include_tasks` paths: a role's `tasks/main.yml` resolves relative includes from its own `tasks/` directory, so `../../test_common/tasks/x.yml` reaches the sibling role. If Ansible rejects that in practice, replace those includes with `ansible.builtin.include_role: {name: test_common, tasks_from: x.yml}` and keep the same `vars:` block — behaviour is identical.
+
+- [ ] **Step 5: Write the t01 playbook**
+
+`ansible/playbooks/tests/t01-backup-full.yml`:
+
+```yaml
+---
+- name: "t01 — on-demand full backup"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  roles:
+    - test_common
+    - t01_backup_full
+```
+
+Every later scenario playbook is this file with the name, comment and second role changed. Write each one out in full rather than copying by reference.
+
+- [ ] **Step 6: Run t01 against the live cluster is deferred**
+
+The cluster is redeployed in Task 9; scenarios are executed there. For now:
+
+Run: `cd ansible && ../.venv/bin/ansible-playbook --syntax-check playbooks/tests/t01-backup-full.yml`
+Expected: no syntax errors.
+
+- [ ] **Step 7: Write the t02 role — backup from the replica**
+
+`ansible/roles/t02_backup_from_replica/tasks/main.yml`. Same shape as t01 with these differences:
+
+- Before requesting the backup, resolve the replica pod and confirm it is read-only:
+
+```yaml
+    - name: Find a read-only replica to back up from
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        for p in $(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort); do
+          ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+          if [ "$ro" = "1" ]; then echo "$p"; exit 0; fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: replica_pod
+      changed_when: false
+```
+
+- The backup definition is:
+
+```yaml
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: full
+            sourcePod: "{{ replica_pod.stdout | trim }}"
+```
+
+named `t02-replica`.
+
+- After the backup succeeds, prove the primary served writes the whole time:
+
+```yaml
+    - name: Confirm the primary stayed writable during the replica backup
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.t02_writes (id INT AUTO_INCREMENT PRIMARY KEY, at DATETIME);
+           INSERT INTO {{ sysbench_database }}.t02_writes (at) VALUES (UTC_TIMESTAMP());
+           SELECT CONCAT('PRIMARY_WRITABLE=', IF(@@read_only=0,'yes','no'));
+           SELECT CONCAT('PRIMARY_WRITES=', COUNT(*)) FROM {{ sysbench_database }}.t02_writes;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: primary_writes
+      changed_when: true
+```
+
+- Assertions: backup state succeeded; `status.destination` contains the bucket; the resolved source pod is not `-mysql-0`; `PRIMARY_WRITABLE=yes`.
+- Evidence: `SOURCE_POD=<pod>`, backup state, destination, plus `primary_writes.stdout_lines`.
+- `scenario_id: t02`, `scenario_title: Backup taken from the replica, primary untouched`.
+
+- [ ] **Step 8: Write the t02 playbook**
+
+`ansible/playbooks/tests/t02-backup-from-replica.yml` — the Step 5 file with `name: "t02 — backup from the replica"` and roles `test_common`, `t02_backup_from_replica`.
+
+- [ ] **Step 9: Write the t03 role — incremental on the full base**
+
+`ansible/roles/t03_backup_incremental/tasks/main.yml`. Same shape, with:
+
+- A guard that the base exists:
+
+```yaml
+    - name: Require the t01 full backup as the incremental base
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t01-full
+      register: t03_base
+      failed_when:
+        - (t03_base.resources | default([]) | length) == 0
+          or (t03_base.resources[0].status.state | default('') | lower) not in ['succeeded', 'ready', 'done']
+```
+
+- Write a known quantity of new data first, so the incremental has something to carry and the size comparison is meaningful:
+
+```yaml
+    - name: Write 50k new rows since the base backup
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.t03_delta (id INT AUTO_INCREMENT PRIMARY KEY, pad CHAR(120));
+           INSERT INTO {{ sysbench_database }}.t03_delta (pad)
+             SELECT LEFT(MD5(RAND()), 120) FROM {{ sysbench_database }}.sbtest1 LIMIT 50000;
+           SELECT CONCAT('DELTA_ROWS=', COUNT(*)) FROM {{ sysbench_database }}.t03_delta;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t03_delta
+      changed_when: true
+```
+
+- The backup definition, named `t03-incr`:
+
+```yaml
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: incremental
+            incrementalBaseBackupName: t01-full
+```
+
+- After success, size both destinations with `mc du` (two includes of `mc.yml`, registering into distinct facts by copying `mc_out.stdout` into `t03_full_du` and `t03_incr_du` with `set_fact` right after each include; `mc_out` is overwritten by the second call).
+- Assertions: state succeeded; `status.type` is `incremental`; the incremental's byte count is strictly less than the full's. Parse the leading integer of `mc du --json`-free output by taking `mc du` first field, e.g. `471MiB`; to compare reliably, use `mc du --json` and parse `size`:
+
+```yaml
+      vars:
+        mc_args: "mc du --json local/{{ backup_bucket }}/<prefix> | tail -1"
+```
+
+then `(t03_incr_du | from_json).size < (t03_full_du | from_json).size`. Derive `<prefix>` from each backup's `status.destination` by stripping the `s3://{{ backup_bucket }}/` scheme:
+
+```yaml
+    - name: Derive the MinIO prefixes for both backups
+      ansible.builtin.set_fact:
+        t03_full_prefix: "{{ t03_base.resources[0].status.destination | regex_replace('^s3://' ~ backup_bucket ~ '/', '') }}"
+        t03_incr_prefix: "{{ t03_bkp.resources[0].status.destination | regex_replace('^s3://' ~ backup_bucket ~ '/', '') }}"
+```
+
+If `status.destination` turns out not to carry an `s3://` scheme on this operator version, adjust the regex to whatever the recorded destination actually looks like — Task 9 is where that is confirmed against real output.
+
+- `scenario_id: t03`, `scenario_title: Incremental backup on a full base`.
+- Evidence: delta rows, both destinations, both byte counts, and the ratio.
+
+- [ ] **Step 10: Write the t03 playbook**
+
+`ansible/playbooks/tests/t03-backup-incremental.yml` — Step 5's file with `t03_backup_incremental`.
+
+- [ ] **Step 11: Run the tests to verify they pass**
+
+Run: `make test`
+Expected: PASS.
+
+- [ ] **Step 12: Syntax-check all three**
+
+Run: `cd ansible && for p in t01-backup-full t02-backup-from-replica t03-backup-incremental; do ../.venv/bin/ansible-playbook --syntax-check playbooks/tests/$p.yml; done`
+Expected: no syntax errors.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add -A
+git commit -m "Add backup scenarios: full, from replica, incremental"
+```
+
+---
+
+### Task 5: Scenarios 04–06 — storage, schedule and retention
+
+Three scenarios that prove the backups exist as objects, that the operator's cron produces them unattended, and that `keep` actually prunes.
+
+**Files:**
+- Create: `ansible/roles/t04_storage_contents/tasks/main.yml`, `ansible/playbooks/tests/t04-storage-contents.yml`
+- Create: `ansible/roles/t05_backup_scheduled/tasks/main.yml`, `ansible/playbooks/tests/t05-backup-scheduled.yml`
+- Create: `ansible/roles/t06_backup_retention/tasks/main.yml`, `ansible/playbooks/tests/t06-backup-retention.yml`
+- Modify: `ansible/inventory/group_vars/all.yml`
+- Test: `tests/test_lab_config.py`
+
+**Interfaces:**
+- Consumes: `mc.yml`, `health_gate.yml`, `record_result.yml`; the backup objects from Task 4.
+- Produces: vars `suite_fast_schedule: "*/3 * * * *"`, `suite_fast_keep: 2`, `suite_schedule_name: suite-fast`. Scenarios 05 and 06 both patch `spec.backup.schedule` to a single fast entry and restore the shipped schedule in an `always` block.
+
+- [ ] **Step 1: Write the failing structural test**
+
+Extend the Task 4 test to cover the first six scenarios and add:
+
+```python
+    def test_schedule_scenarios_restore_the_shipped_schedule(self) -> None:
+        v = load_group_vars()
+        self.assertEqual(v["suite_schedule_name"], "suite-fast")
+        self.assertEqual(int(v["suite_fast_keep"]), 2)
+        for sid in ("t05_backup_scheduled", "t06_backup_retention"):
+            text = (ANSIBLE / "roles" / sid / "tasks" / "main.yml").read_text()
+            self.assertIn("always:", text)
+            self.assertIn("backup_schedule", text)
+            self.assertIn("xb-cron", text)
+```
+
+Change `self.SCENARIOS[:3]` to `self.SCENARIOS[:6]` in `test_every_scenario_has_a_role_and_playbook`.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make test`
+Expected: FAIL — `KeyError: 'suite_schedule_name'`.
+
+- [ ] **Step 3: Add the schedule variables**
+
+Append to `ansible/inventory/group_vars/all.yml`:
+
+```yaml
+suite_schedule_name: suite-fast
+suite_fast_schedule: "*/3 * * * *"
+suite_fast_keep: 2
+```
+
+- [ ] **Step 4: Write the t04 role — storage contents**
+
+`ansible/roles/t04_storage_contents/tasks/main.yml`, standard shape, body:
+
+```yaml
+    - name: List the backup bucket
+      ansible.builtin.include_tasks: ../../test_common/tasks/mc.yml
+      vars:
+        mc_args: "mc ls --recursive local/{{ backup_bucket }}"
+
+    - name: Keep the backup listing
+      ansible.builtin.set_fact:
+        t04_backup_ls: "{{ mc_out.stdout_lines }}"
+
+    - name: Count binlog objects, wait, count again
+      ansible.builtin.include_tasks: ../../test_common/tasks/mc.yml
+      vars:
+        mc_args: >-
+          mc ls --recursive local/{{ binlog_bucket }} | wc -l;
+          sleep 90;
+          mc ls --recursive local/{{ binlog_bucket }} | wc -l;
+          mc ls --recursive local/{{ binlog_bucket }} | tail -5
+
+    - name: Keep the binlog listing
+      ansible.builtin.set_fact:
+        t04_binlog_ls: "{{ mc_out.stdout_lines }}"
+
+    - name: Require real backup objects and a live binlog stream
+      ansible.builtin.assert:
+        that:
+          - t04_backup_ls | select('search', 'xtrabackup') | list | length > 0
+          - t04_backup_ls | select('search', ' 0B ') | list | length == 0
+          - (t04_binlog_ls | select('match', '^[0-9]+$') | list | first | int) > 0
+          - (t04_binlog_ls | select('match', '^[0-9]+$') | list | last | int)
+            >= (t04_binlog_ls | select('match', '^[0-9]+$') | list | first | int)
+        fail_msg: >-
+          Storage does not look right. backups={{ t04_backup_ls }} binlogs={{ t04_binlog_ls }}
+```
+
+The 90-second wait is deliberate: `binlog_checkpoint_interval` is 30s, so a live stream must have written at least one more object by then. The assertion is `>=` rather than `>` because a fully idle server may legitimately not roll a new object; the `> 0` first count is what proves streaming works at all. If the count never moves while writes are happening, that is a real finding for Task 9 to chase.
+
+- `scenario_id: t04`, `scenario_title: Backup and binlog objects present in MinIO`.
+- Evidence: `t04_backup_ls + t04_binlog_ls`.
+
+- [ ] **Step 5: Write the t05 role — scheduled backup**
+
+`ansible/roles/t05_backup_scheduled/tasks/main.yml`:
+
+```yaml
+---
+- name: Start the t05 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+    t05_seen_before: []
+
+- block:
+    - name: Gate on cluster health before t05
+      ansible.builtin.include_tasks: ../../test_common/tasks/health_gate.yml
+
+    - name: Note the cron backups that already exist
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+      register: t05_before
+
+    - name: Remember their names
+      ansible.builtin.set_fact:
+        t05_seen_before: "{{ t05_before.resources | map(attribute='metadata.name') | select('match', '^xb-cron-') | list }}"
+
+    - name: Patch the cluster to a fast backup schedule
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: patched
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQL
+        namespace: "{{ mysql_namespace }}"
+        name: "{{ mysql_cluster_name }}"
+        definition:
+          spec:
+            backup:
+              schedule:
+                - name: "{{ suite_schedule_name }}"
+                  schedule: "{{ suite_fast_schedule }}"
+                  keep: "{{ backup_keep }}"
+                  storageName: "{{ backup_storage_name }}"
+                  type: full
+
+    - name: Wait for the cron to create and finish a new backup
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+      register: t05_after
+      until: >-
+        (t05_after.resources
+          | selectattr('metadata.name', 'match', '^xb-cron-')
+          | rejectattr('metadata.name', 'in', t05_seen_before)
+          | selectattr('status.state', 'defined')
+          | selectattr('status.state', 'match', '(?i)^(succeeded|ready|done)$')
+          | list | length) >= 1
+      retries: 60
+      delay: 15
+
+    - name: Describe the new scheduled backup
+      ansible.builtin.set_fact:
+        t05_new: >-
+          {{ (t05_after.resources
+              | selectattr('metadata.name', 'match', '^xb-cron-')
+              | rejectattr('metadata.name', 'in', t05_seen_before)
+              | selectattr('status.state', 'defined')
+              | selectattr('status.state', 'match', '(?i)^(succeeded|ready|done)$')
+              | list | first) }}
+
+    - name: Require the scheduled backup to be a real backup
+      ansible.builtin.assert:
+        that:
+          - t05_new.metadata.name is search(suite_schedule_name) or t05_new.metadata.name is match('^xb-cron-')
+          - backup_bucket in (t05_new.status.destination | default(''))
+        fail_msg: "Scheduled backup looks wrong: {{ t05_new }}"
+
+    - name: Record t05 as passed
+      ansible.builtin.include_tasks: ../../test_common/tasks/record_result.yml
+      vars:
+        scenario_id: t05
+        scenario_title: Scheduled backup runs unattended
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence:
+          - "SCHEDULE_PATCHED={{ suite_fast_schedule }}"
+          - "PRE_EXISTING_CRON_BACKUPS={{ t05_seen_before | length }}"
+          - "NEW_BACKUP={{ t05_new.metadata.name }}"
+          - "NEW_BACKUP_STATE={{ t05_new.status.state }}"
+          - "NEW_BACKUP_DESTINATION={{ t05_new.status.destination | default('n/a') }}"
+          - "NEW_BACKUP_COMPLETED={{ t05_new.status.completed | default('n/a') }}"
+
+  rescue:
+    - name: Record t05 as failed
+      ansible.builtin.include_tasks: ../../test_common/tasks/record_result.yml
+      vars:
+        scenario_id: t05
+        scenario_title: Scheduled backup runs unattended
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t05
+      ansible.builtin.fail:
+        msg: "t05 failed: {{ ansible_failed_result.msg | default('see above') }}"
+
+  always:
+    - name: Restore the shipped backup schedule
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: patched
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQL
+        namespace: "{{ mysql_namespace }}"
+        name: "{{ mysql_cluster_name }}"
+        definition:
+          spec:
+            backup:
+              schedule:
+                - name: hourly-full
+                  schedule: "{{ backup_schedule }}"
+                  keep: "{{ backup_keep }}"
+                  storageName: "{{ backup_storage_name }}"
+                  type: full
+```
+
+- [ ] **Step 6: Write the t06 role — retention**
+
+`ansible/roles/t06_backup_retention/tasks/main.yml`, same structure as t05, with `keep: "{{ suite_fast_keep }}"` in the patch and this as the body between patch and restore:
+
+```yaml
+    - name: Wait for more cron backups than keep allows
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        label_selectors:
+          - percona.com/backup-ancestor={{ suite_schedule_name }}
+      register: t06_cron
+      until: >-
+        (t06_cron.resources
+          | selectattr('status.state', 'defined')
+          | selectattr('status.state', 'match', '(?i)^(succeeded|ready|done)$')
+          | list | length) >= ((suite_fast_keep | int) + 1)
+      retries: 80
+      delay: 15
+      failed_when: false
+
+    - name: Fall back to name matching if the ancestor label is absent
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+      register: t06_all
+      until: >-
+        (t06_all.resources
+          | selectattr('metadata.name', 'search', suite_schedule_name)
+          | selectattr('status.state', 'defined')
+          | selectattr('status.state', 'match', '(?i)^(succeeded|ready|done)$')
+          | list | length) >= ((suite_fast_keep | int) + 1)
+      retries: 80
+      delay: 15
+      when: (t06_cron.resources | default([]) | length) == 0
+
+    - name: Give the operator a pruning cycle
+      ansible.builtin.pause:
+        seconds: 200
+
+    - name: Count what survived
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+      register: t06_final
+
+    - name: List the backup bucket after pruning
+      ansible.builtin.include_tasks: ../../test_common/tasks/mc.yml
+      vars:
+        mc_args: "mc ls local/{{ backup_bucket }}/{{ mysql_cluster_name }} | wc -l; mc ls local/{{ backup_bucket }}/{{ mysql_cluster_name }}"
+
+    - name: Require retention to have pruned down to keep
+      ansible.builtin.set_fact:
+        t06_surviving: >-
+          {{ t06_final.resources
+             | selectattr('metadata.name', 'search', suite_schedule_name)
+             | map(attribute='metadata.name') | list }}
+
+    - name: Assert the surviving count matches keep
+      ansible.builtin.assert:
+        that:
+          - (t06_surviving | length) <= (suite_fast_keep | int)
+        fail_msg: >-
+          Retention did not prune: keep={{ suite_fast_keep }} surviving={{ t06_surviving }}
+```
+
+- Evidence: the observed backup names before pruning, the surviving names, the keep value, and the `mc ls` output.
+- `scenario_id: t06`, `scenario_title: Retention prunes scheduled backups down to keep`.
+
+The 200-second pause is because the operator prunes on its own reconcile cadence, not instantly. If Task 9 shows pruning takes longer, raise it there and record the real number in the documentation.
+
+- [ ] **Step 7: Write the three playbooks**
+
+`ansible/playbooks/tests/t04-storage-contents.yml`, `t05-backup-scheduled.yml`, `t06-backup-retention.yml` — the Task 4 Step 5 file, each with its own `name:` and its own second role.
+
+- [ ] **Step 8: Run the tests to verify they pass**
+
+Run: `make test`
+Expected: PASS.
+
+- [ ] **Step 9: Syntax-check**
+
+Run: `cd ansible && for p in t04-storage-contents t05-backup-scheduled t06-backup-retention; do ../.venv/bin/ansible-playbook --syntax-check playbooks/tests/$p.yml; done`
+Expected: no syntax errors.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add -A
+git commit -m "Add storage, scheduled backup and retention scenarios"
+```
+
+---
+
+### Task 6: Scenarios 07–08 — restore in place
+
+The first two scenarios that prove a backup restores: a whole-cluster restore that must roll back a canary, and a dropped-table disaster.
+
+**Files:**
+- Create: `ansible/roles/t07_restore_in_place/tasks/main.yml`, `ansible/playbooks/tests/t07-restore-in-place.yml`
+- Create: `ansible/roles/t08_restore_dropped_table/tasks/main.yml`, `ansible/playbooks/tests/t08-restore-dropped-table.yml`
+- Test: `tests/test_lab_config.py`
+
+**Interfaces:**
+- Consumes: `t01-full` backup, the shared includes.
+- Produces: restore objects `t07-restore` and `t08-restore`. Both delete any same-named predecessor first, so scenarios are re-runnable.
+
+- [ ] **Step 1: Write the failing structural test**
+
+Change `self.SCENARIOS[:6]` to `self.SCENARIOS[:8]` and add:
+
+```python
+    def test_restore_scenarios_prove_rollback(self) -> None:
+        t07 = (ANSIBLE / "roles" / "t07_restore_in_place" / "tasks" / "main.yml").read_text()
+        self.assertIn("canary", t07)
+        self.assertIn("PerconaServerMySQLRestore", t07)
+        t08 = (ANSIBLE / "roles" / "t08_restore_dropped_table" / "tasks" / "main.yml").read_text()
+        self.assertIn("DROP TABLE", t08)
+        self.assertIn("sbtest10", t08)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make test`
+Expected: FAIL — missing role tasks for t07.
+
+- [ ] **Step 3: Write the t07 role**
+
+`ansible/roles/t07_restore_in_place/tasks/main.yml`, standard shape, body:
+
+```yaml
+    - name: Find the writable primary
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        for p in $(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort); do
+          ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+          if [ "$ro" = "0" ]; then echo "$p"; exit 0; fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: t07_primary
+      changed_when: false
+
+    - name: Create a canary that the backup cannot contain
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ t07_primary.stdout | trim }} -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.canary_after_backup (id INT PRIMARY KEY, note VARCHAR(64));
+           INSERT INTO {{ sysbench_database }}.canary_after_backup VALUES (1,'written after the backup')
+             ON DUPLICATE KEY UPDATE note=VALUES(note);
+           SELECT CONCAT('CANARY_BEFORE_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name='canary_after_backup';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t07_canary
+      changed_when: true
+
+    - name: Require the canary to exist before restoring
+      ansible.builtin.assert:
+        that:
+          - "'CANARY_BEFORE_RESTORE=1' in t07_canary.stdout"
+
+    - name: Remove any stale t07 restore object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t07-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Restore the full backup over the running cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t07-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            backupName: t01-full
+
+    - name: Wait for the restore to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t07-restore
+      register: t07_rst
+      until:
+        - t07_rst.resources | length == 1
+        - (t07_rst.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 160
+      delay: 15
+
+    - name: Require the restore to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t07_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "Restore failed: {{ t07_rst.resources[0].status | default({}) }}"
+
+    - name: Gate on cluster health after the restore
+      ansible.builtin.include_tasks: ../../test_common/tasks/health_gate.yml
+
+    - name: Measure the restored dataset
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('RESTORED_TABLES=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+           SELECT CONCAT('RESTORED_SIZE_MB=', IFNULL(ROUND(SUM(data_length+index_length)/1024/1024),0))
+             FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}';
+           SELECT CONCAT('CANARY_AFTER_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name='canary_after_backup';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t07_after
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: t07_after.rc == 0
+
+    - name: Require the dataset back and the canary gone
+      ansible.builtin.assert:
+        that:
+          - "'RESTORED_TABLES=' ~ sysbench_tables in t07_after.stdout"
+          - "'CANARY_AFTER_RESTORE=0' in t07_after.stdout"
+          - (t07_after.stdout_lines | select('match', '^RESTORED_SIZE_MB=') | first).split('=')[1] | int
+            >= (data_size_min_mb | int)
+        fail_msg: "Restore did not roll the cluster back: {{ t07_after.stdout }}"
+```
+
+- `scenario_id: t07`, `scenario_title: Whole-cluster restore rolls back post-backup writes`.
+- Evidence: `t07_canary.stdout_lines + ['RESTORE_STATE=' ~ state] + t07_after.stdout_lines + ['HEALTH=' ~ health_summary]`.
+
+- [ ] **Step 4: Write the t08 role**
+
+`ansible/roles/t08_restore_dropped_table/tasks/main.yml`. Same shape as t07, differing in the damage and the assertions:
+
+```yaml
+    - name: Record sbtest10 before dropping it
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ t08_primary.stdout | trim }} -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('ROWS_BEFORE_DROP=', COUNT(*)) FROM {{ sysbench_database }}.sbtest10;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t08_before
+      changed_when: false
+
+    - name: Drop the table, as a tired human would at 02:00
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ t08_primary.stdout | trim }} -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "DROP TABLE {{ sysbench_database }}.sbtest10;
+           SELECT CONCAT('TABLES_AFTER_DROP=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t08_drop
+      changed_when: true
+
+    - name: Require the table to actually be gone
+      ansible.builtin.assert:
+        that:
+          - "'TABLES_AFTER_DROP=' ~ ((sysbench_tables | int) - 1) in t08_drop.stdout"
+```
+
+Then the same restore block with names `t08-restore` and `backupName: t01-full`, the health gate, and:
+
+```yaml
+    - name: Require sbtest10 back with its rows
+      ansible.builtin.assert:
+        that:
+          - "'TABLES_AFTER_RESTORE=' ~ sysbench_tables in t08_after.stdout"
+          - (t08_after.stdout_lines | select('match', '^ROWS_AFTER_RESTORE=') | first).split('=')[1] | int
+            == (t08_before.stdout_lines | select('match', '^ROWS_BEFORE_DROP=') | first).split('=')[1] | int
+        fail_msg: "Dropped table did not come back intact: {{ t08_after.stdout }}"
+```
+
+where `t08_after` queries `TABLES_AFTER_RESTORE` and `ROWS_AFTER_RESTORE` the same way t07's measurement task does.
+
+- `scenario_id: t08`, `scenario_title: Restore recovers a dropped table`.
+
+- [ ] **Step 5: Write the two playbooks**
+
+`ansible/playbooks/tests/t07-restore-in-place.yml` and `t08-restore-dropped-table.yml`, following Task 4 Step 5.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `make test`
+Expected: PASS.
+
+- [ ] **Step 7: Syntax-check**
+
+Run: `cd ansible && for p in t07-restore-in-place t08-restore-dropped-table; do ../.venv/bin/ansible-playbook --syntax-check playbooks/tests/$p.yml; done`
+Expected: no syntax errors.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add -A
+git commit -m "Add in-place restore scenarios: canary rollback and dropped table"
+```
+
+---
+
+### Task 7: Scenarios 09–11 — point in time recovery
+
+Recovery to a wall-clock instant, recovery to a GTID, and a negative case proving an impossible target fails loudly instead of silently restoring the wrong thing.
+
+**Files:**
+- Create: `ansible/roles/t09_pitr_timestamp/tasks/main.yml`, `ansible/playbooks/tests/t09-pitr-timestamp.yml`
+- Create: `ansible/roles/t10_pitr_gtid/tasks/main.yml`, `ansible/playbooks/tests/t10-pitr-gtid.yml`
+- Create: `ansible/roles/t11_pitr_invalid_target/tasks/main.yml`, `ansible/playbooks/tests/t11-pitr-invalid-target.yml`
+- Modify: `ansible/inventory/group_vars/all.yml`
+- Test: `tests/test_lab_config.py`
+
+**Interfaces:**
+- Consumes: the shared includes; the binlog server from Task 2.
+- Produces: var `pitr_settle_seconds: 120` — how long a scenario waits after writing markers so the binlog server has certainly checkpointed them to MinIO. Every PITR scenario takes its **own** fresh full backup (`t09-base`, `t10-base`, `t11-base`) rather than reusing `t01-full`, because a PITR target must lie after its base backup and the earlier scenarios have already restored the cluster twice.
+
+- [ ] **Step 1: Write the failing structural test**
+
+Change `self.SCENARIOS[:8]` to `self.SCENARIOS[:11]` and add:
+
+```python
+    def test_pitr_scenarios_use_both_target_types(self) -> None:
+        v = load_group_vars()
+        self.assertGreaterEqual(int(v["pitr_settle_seconds"]), 60)
+        t09 = (ANSIBLE / "roles" / "t09_pitr_timestamp" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: date", t09)
+        self.assertIn("UTC_TIMESTAMP", t09)
+        t10 = (ANSIBLE / "roles" / "t10_pitr_gtid" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: gtid", t10)
+        self.assertIn("gtid_executed", t10)
+        t11 = (ANSIBLE / "roles" / "t11_pitr_invalid_target" / "tasks" / "main.yml").read_text()
+        self.assertIn("failed", t11)
+        self.assertIn("health_gate.yml", t11)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make test`
+Expected: FAIL — `KeyError: 'pitr_settle_seconds'`.
+
+- [ ] **Step 3: Add the settle variable**
+
+Append to `ansible/inventory/group_vars/all.yml`:
+
+```yaml
+pitr_settle_seconds: 120
+```
+
+- [ ] **Step 4: Write the t09 role — recover to a timestamp**
+
+`ansible/roles/t09_pitr_timestamp/tasks/main.yml`, standard shape, body:
+
+```yaml
+    - name: Take a fresh base backup for the PITR window
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t09-base
+        wait: true
+        wait_timeout: 180
+
+    - name: Request the t09 base backup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLBackup
+          metadata:
+            name: t09-base
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: full
+
+    - name: Wait for the t09 base backup
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t09-base
+      register: t09_base
+      until:
+        - t09_base.resources | length == 1
+        - (t09_base.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 120
+      delay: 10
+
+    - name: Require the base backup
+      ansible.builtin.assert:
+        that:
+          - (t09_base.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "t09 base backup failed: {{ t09_base.resources[0].status | default({}) }}"
+
+    - name: Find the writable primary
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        for p in $(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort); do
+          ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+          if [ "$ro" = "0" ]; then echo "$p"; exit 0; fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: t09_primary
+      changed_when: false
+
+    - name: Write the "good" marker, capture the recovery target, then write the "bad" marker
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        POD="{{ t09_primary.stdout | trim }}"
+        q() { kubectl -n "$NS" exec "$POD" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        q "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.pitr_markers
+             (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32), at DATETIME(6))"
+        q "DELETE FROM {{ sysbench_database }}.pitr_markers"
+        q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('good', UTC_TIMESTAMP(6))"
+        echo "GOOD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='good'")"
+        sleep 20
+        # The recovery target: after 'good', before 'bad'.
+        echo "PITR_TARGET=$(q "SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%sZ')")"
+        sleep 20
+        q "INSERT INTO {{ sysbench_database }}.pitr_markers (label, at) VALUES ('bad', UTC_TIMESTAMP(6))"
+        echo "BAD_MARKER_AT=$(q "SELECT MAX(at) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad'")"
+        echo "MARKERS_BEFORE_RESTORE=$(q "SELECT GROUP_CONCAT(label ORDER BY id) FROM {{ sysbench_database }}.pitr_markers")"
+      args:
+        executable: /bin/bash
+      register: t09_markers
+      changed_when: true
+
+    - name: Let the binlog server checkpoint both markers to MinIO
+      ansible.builtin.pause:
+        seconds: "{{ pitr_settle_seconds }}"
+
+    - name: Extract the recovery target
+      ansible.builtin.set_fact:
+        t09_target: >-
+          {{ (t09_markers.stdout_lines | select('match', '^PITR_TARGET=') | first).split('=')[1] }}
+
+    - name: Remove any stale t09 restore object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t09-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Recover to the captured timestamp
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t09-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            backupName: t09-base
+            pitr:
+              type: date
+              date: "{{ t09_target }}"
+              backupSource:
+                binlogServer:
+                  image: "{{ binlog_server_image }}"
+                  serverId: "{{ binlog_server_id | int + 10 }}"
+                  storage:
+                    s3:
+                      bucket: "{{ binlog_bucket }}"
+                      credentialsSecret: "{{ minio_credentials_secret }}"
+                      endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
+                      region: us-east-1
+                      prefix: "{{ binlog_prefix }}"
+
+    - name: Wait for the PITR restore to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t09-restore
+      register: t09_rst
+      until:
+        - t09_rst.resources | length == 1
+        - (t09_rst.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 160
+      delay: 15
+
+    - name: Require the PITR restore to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t09_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "PITR to {{ t09_target }} failed: {{ t09_rst.resources[0].status | default({}) }}"
+
+    - name: Gate on cluster health after the PITR restore
+      ansible.builtin.include_tasks: ../../test_common/tasks/health_gate.yml
+
+    - name: Inspect the markers after recovery
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('GOOD_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.pitr_markers WHERE label='good';
+           SELECT CONCAT('BAD_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.pitr_markers WHERE label='bad';
+           SELECT CONCAT('TABLES_AFTER_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t09_after
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: t09_after.rc == 0
+
+    - name: Require the good marker present and the bad marker rolled away
+      ansible.builtin.assert:
+        that:
+          - "'GOOD_AFTER_RESTORE=1' in t09_after.stdout"
+          - "'BAD_AFTER_RESTORE=0' in t09_after.stdout"
+          - "'TABLES_AFTER_RESTORE=' ~ sysbench_tables in t09_after.stdout"
+        fail_msg: >-
+          PITR landed on the wrong point. target={{ t09_target }} result={{ t09_after.stdout }}
+```
+
+- `scenario_id: t09`, `scenario_title: Point-in-time recovery to a timestamp`.
+- Evidence: `t09_markers.stdout_lines + ['PITR_TARGET=' ~ t09_target, 'RESTORE_STATE=' ~ state] + t09_after.stdout_lines`.
+
+- [ ] **Step 5: Write the t10 role — recover to a GTID**
+
+`ansible/roles/t10_pitr_gtid/tasks/main.yml`. Identical structure to t09 with a fresh base named `t10-base`, restore named `t10-restore`, and this instead of the marker/target block:
+
+```yaml
+    - name: Write good data, capture the GTID, then commit the destructive statement
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        POD="{{ t10_primary.stdout | trim }}"
+        q() { kubectl -n "$NS" exec "$POD" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        q "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.gtid_markers
+             (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32))"
+        q "DELETE FROM {{ sysbench_database }}.gtid_markers"
+        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('keep-me')"
+        echo "GTID_TARGET=$(q "SELECT @@GLOBAL.gtid_executed" | tr -d '\n')"
+        echo "ROWS_BEFORE_DAMAGE=$(q "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest9")"
+        sleep 20
+        q "DELETE FROM {{ sysbench_database }}.sbtest9"
+        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('after-damage')"
+        echo "ROWS_AFTER_DAMAGE=$(q "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest9")"
+      args:
+        executable: /bin/bash
+      register: t10_markers
+      changed_when: true
+
+    - name: Let the binlog server checkpoint the damage to MinIO
+      ansible.builtin.pause:
+        seconds: "{{ pitr_settle_seconds }}"
+
+    - name: Extract the GTID target
+      ansible.builtin.set_fact:
+        t10_target: >-
+          {{ (t10_markers.stdout_lines | select('match', '^GTID_TARGET=') | first).split('=', 1)[1] | trim }}
+```
+
+The restore body is t09's with:
+
+```yaml
+            pitr:
+              type: gtid
+              gtid: "{{ t10_target }}"
+```
+
+and the same `backupSource.binlogServer` block, `serverId: "{{ binlog_server_id | int + 11 }}"`.
+
+Assertions after the restore:
+
+```yaml
+    - name: Require the deletion to be undone and the later marker absent
+      ansible.builtin.assert:
+        that:
+          - (t10_after.stdout_lines | select('match', '^ROWS_AFTER_RESTORE=') | first).split('=')[1] | int
+            == (t10_markers.stdout_lines | select('match', '^ROWS_BEFORE_DAMAGE=') | first).split('=')[1] | int
+          - "'KEEP_MARKER=1' in t10_after.stdout"
+          - "'DAMAGE_MARKER=0' in t10_after.stdout"
+        fail_msg: >-
+          GTID recovery landed wrong. target={{ t10_target }} result={{ t10_after.stdout }}
+```
+
+where `t10_after` selects `ROWS_AFTER_RESTORE` from `sbtest9`, `KEEP_MARKER` as the count of `label='keep-me'`, and `DAMAGE_MARKER` as the count of `label='after-damage'`.
+
+- `scenario_id: t10`, `scenario_title: Point-in-time recovery to a GTID`.
+
+Note for the implementer: `@@GLOBAL.gtid_executed` is a set like `f3c2…:1-4172`, and the operator recovers *through* that set. If the run shows the target is exclusive rather than inclusive, record which it is — that behaviour is exactly the kind of thing the documentation should state precisely, not hand-wave.
+
+- [ ] **Step 6: Write the t11 role — an impossible target must fail**
+
+`ansible/roles/t11_pitr_invalid_target/tasks/main.yml`, standard shape, body:
+
+```yaml
+    - name: Require a base backup to aim before
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t09-base
+      register: t11_base
+      failed_when: (t11_base.resources | default([]) | length) == 0
+
+    - name: Remove any stale t11 restore object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t11-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Ask for recovery to a point long before the backup existed
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t11-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            backupName: t09-base
+            pitr:
+              type: date
+              date: "2001-01-01T00:00:00Z"
+              backupSource:
+                binlogServer:
+                  image: "{{ binlog_server_image }}"
+                  serverId: "{{ binlog_server_id | int + 12 }}"
+                  storage:
+                    s3:
+                      bucket: "{{ binlog_bucket }}"
+                      credentialsSecret: "{{ minio_credentials_secret }}"
+                      endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
+                      region: us-east-1
+                      prefix: "{{ binlog_prefix }}"
+
+    - name: Wait for the operator to reject or fail the impossible restore
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t11-restore
+      register: t11_rst
+      until:
+        - t11_rst.resources | length == 1
+        - (t11_rst.resources[0].status.state | default('') | lower) in ['failed', 'error']
+      retries: 60
+      delay: 15
+
+    - name: Require a clean, explained failure
+      ansible.builtin.assert:
+        that:
+          - (t11_rst.resources[0].status.state | default('') | lower) in ['failed', 'error']
+          - (t11_rst.resources[0].status.stateDescription | default('') | length) > 0
+        fail_msg: >-
+          An impossible PITR target did not fail cleanly: {{ t11_rst.resources[0].status | default({}) }}
+
+    - name: Delete the failed restore object so it cannot block later work
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t11-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Gate on cluster health after the failed restore
+      ansible.builtin.include_tasks: ../../test_common/tasks/health_gate.yml
+
+    - name: Confirm the data is untouched
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('TABLES_AFTER_FAILED_RESTORE=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t11_after
+      changed_when: false
+
+    - name: Require the dataset to have survived
+      ansible.builtin.assert:
+        that:
+          - "'TABLES_AFTER_FAILED_RESTORE=' ~ sysbench_tables in t11_after.stdout"
+```
+
+- `scenario_id: t11`, `scenario_title: An impossible recovery target fails cleanly`.
+- Evidence: the restore `state`, its `stateDescription`, the health summary, and `t11_after.stdout_lines`.
+
+If the operator instead *succeeds* and silently restores the plain backup, that is a genuine finding: record `status: failed` for the scenario, keep the evidence, and document the behaviour honestly in Task 10 rather than reshaping the assertion to match.
+
+- [ ] **Step 7: Write the three playbooks**
+
+`t09-pitr-timestamp.yml`, `t10-pitr-gtid.yml`, `t11-pitr-invalid-target.yml`, following Task 4 Step 5.
+
+- [ ] **Step 8: Run the tests to verify they pass**
+
+Run: `make test`
+Expected: PASS.
+
+- [ ] **Step 9: Syntax-check**
+
+Run: `cd ansible && for p in t09-pitr-timestamp t10-pitr-gtid t11-pitr-invalid-target; do ../.venv/bin/ansible-playbook --syntax-check playbooks/tests/$p.yml; done`
+Expected: no syntax errors.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add -A
+git commit -m "Add PITR scenarios: timestamp, GTID, and an invalid target"
+```
+
+---
+
+### Task 8: Scenario 12 — restore into a new cluster and let it replicate
+
+The scenario that actually verifies the backup. Restore into a *separate* cluster from the MinIO objects alone, attach it as a replica of the live cluster, and prove it catches up and matches.
+
+**Files:**
+- Create: `ansible/roles/t12_restore_as_replica/tasks/main.yml`
+- Create: `ansible/roles/t12_restore_as_replica/templates/verify-cluster.yaml.j2`
+- Create: `ansible/playbooks/tests/t12-restore-as-replica.yml`
+- Modify: `ansible/inventory/group_vars/all.yml`
+- Test: `tests/test_lab_config.py`
+
+**Interfaces:**
+- Consumes: the shared includes.
+- Produces: vars `verify_cluster_name: verify`, `verify_catchup_retries: 60`, `verify_catchup_delay: 10`. The scenario takes its own backup (`t12-base`) so it depends on no earlier scenario, and deletes the `verify` cluster and its copied secrets in an `always` block so the lab is left as found.
+
+- [ ] **Step 1: Write the failing structural test**
+
+Change `self.SCENARIOS[:11]` to `self.SCENARIOS` (all twelve) and add:
+
+```python
+    def test_restore_as_replica_is_a_real_verification(self) -> None:
+        v = load_group_vars()
+        self.assertEqual(v["verify_cluster_name"], "verify")
+        self.assertNotEqual(v["verify_cluster_name"], v["mysql_cluster_name"])
+
+        role = ANSIBLE / "roles" / "t12_restore_as_replica"
+        text = (role / "tasks" / "main.yml").read_text()
+        # restores from the object store, not from the source cluster's backup CR
+        self.assertIn("backupSource", text)
+        self.assertIn("destination", text)
+        # copies both the user secret and the operator's internal secret
+        self.assertIn("internal-", text)
+        self.assertIn("secretsName", (role / "templates" / "verify-cluster.yaml.j2").read_text())
+        # sets up replication and waits for catch-up
+        self.assertIn("CHANGE REPLICATION SOURCE TO", text)
+        self.assertIn("SOURCE_AUTO_POSITION", text)
+        self.assertIn("Seconds_Behind_Source", text)
+        self.assertIn("CHECKSUM TABLE", text)
+        # cleans up after itself
+        self.assertIn("always:", text)
+
+    def test_verify_cluster_template_is_a_minimal_single_node(self) -> None:
+        rendered = yaml.safe_load(
+            render_template(
+                ANSIBLE / "roles" / "t12_restore_as_replica" / "templates" / "verify-cluster.yaml.j2"
+            )
+        )
+        spec = rendered["spec"]
+        self.assertEqual(rendered["metadata"]["name"], "verify")
+        self.assertEqual(int(spec["mysql"]["size"]), 1)
+        self.assertFalse(spec["orchestrator"]["enabled"])
+        self.assertFalse(spec["proxy"]["haproxy"]["enabled"])
+        self.assertNotIn("pitr", spec["backup"])
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make test`
+Expected: FAIL — `KeyError: 'verify_cluster_name'`.
+
+- [ ] **Step 3: Add the variables**
+
+Append to `ansible/inventory/group_vars/all.yml`:
+
+```yaml
+verify_cluster_name: verify
+verify_catchup_retries: 60
+verify_catchup_delay: 10
+```
+
+- [ ] **Step 4: Write the verify cluster template**
+
+`ansible/roles/t12_restore_as_replica/templates/verify-cluster.yaml.j2`:
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQL
+metadata:
+  name: {{ verify_cluster_name }}
+  namespace: {{ mysql_namespace }}
+  finalizers:
+    - percona.com/delete-mysql-pods-in-order
+spec:
+  crVersion: "{{ ps_cr_version }}"
+  secretsName: {{ verify_cluster_name }}-secrets
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    apply: disabled
+    versionServiceEndpoint: https://check.percona.com
+  unsafeFlags:
+    mysqlSize: true
+    orchestratorSize: true
+    proxySize: true
+  mysql:
+    clusterType: {{ mysql_cluster_type }}
+    autoRecovery: true
+    size: 1
+    image: {{ mysql_image }}
+    imagePullPolicy: IfNotPresent
+    gracePeriod: 30
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1024Mi
+    affinity:
+      antiAffinityTopologyKey: "none"
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 5Gi
+    configuration: |
+      [mysqld]
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      log_bin=ON
+      binlog_format=ROW
+      binlog_expire_logs_seconds=86400
+      innodb_buffer_pool_size=256M
+      max_connections=80
+      skip_name_resolve
+  proxy:
+    haproxy:
+      enabled: false
+      size: 1
+      image: {{ haproxy_image }}
+    router:
+      enabled: false
+      size: 1
+      image: percona/percona-mysql-router:8.4.10
+  orchestrator:
+    enabled: false
+    size: 1
+    image: {{ orchestrator_image }}
+  backup:
+    enabled: true
+    image: {{ xtrabackup_image }}
+    imagePullPolicy: IfNotPresent
+    storages:
+      {{ backup_storage_name }}:
+        type: s3
+        verifyTLS: false
+        s3:
+          bucket: {{ backup_bucket }}
+          credentialsSecret: {{ minio_credentials_secret }}
+          endpointUrl: http://minio.{{ mysql_namespace }}.svc.cluster.local:9000
+          region: us-east-1
+          prefix: {{ verify_cluster_name }}
+  toolkit:
+    image: {{ toolkit_image }}
+    imagePullPolicy: IfNotPresent
+```
+
+- [ ] **Step 5: Write the t12 role**
+
+`ansible/roles/t12_restore_as_replica/tasks/main.yml`, standard shape. Body, in order:
+
+```yaml
+    - name: Take a dedicated backup for the verification restore
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t12-base
+        wait: true
+        wait_timeout: 180
+
+    - name: Request the t12 base backup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLBackup
+          metadata:
+            name: t12-base
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: full
+
+    - name: Wait for the t12 base backup
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t12-base
+      register: t12_base
+      until:
+        - t12_base.resources | length == 1
+        - (t12_base.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 120
+      delay: 10
+
+    - name: Require the base backup and keep its destination
+      ansible.builtin.assert:
+        that:
+          - (t12_base.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+          - (t12_base.resources[0].status.destination | default('') | length) > 0
+        fail_msg: "t12 base backup failed: {{ t12_base.resources[0].status | default({}) }}"
+
+    - name: Copy the lab secrets to the verification cluster's names
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        copy() {
+          src="$1"; dst="$2"
+          kubectl -n "$NS" get secret "$src" -o json \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); d['metadata']={'name':'$dst','namespace':'$NS'}; d.pop('status',None); print(json.dumps(d))" \
+            | kubectl -n "$NS" apply -f -
+        }
+        copy {{ mysql_secrets_name }} {{ verify_cluster_name }}-secrets
+        copy internal-{{ mysql_cluster_name }} internal-{{ verify_cluster_name }}
+        if kubectl -n "$NS" get secret {{ mysql_cluster_name }}-ssl >/dev/null 2>&1; then
+          copy {{ mysql_cluster_name }}-ssl {{ verify_cluster_name }}-ssl
+        fi
+        echo "SECRETS_COPIED={{ verify_cluster_name }}-secrets,internal-{{ verify_cluster_name }}"
+      args:
+        executable: /bin/bash
+      register: t12_secrets
+      changed_when: true
+```
+
+Why this step exists, and it belongs in the documentation as prominently as in the code: the restored datadir carries the *source* cluster's `mysql.user` table. If the new cluster is given freshly generated passwords, the operator will not be able to log in to the data it has just restored, and the cluster will sit in a crash loop that looks like a restore failure but is an authentication failure.
+
+Then:
+
+```yaml
+    - name: Render the verification cluster
+      ansible.builtin.template:
+        src: verify-cluster.yaml.j2
+        dest: "{{ repo_root }}/k8s/mysql/verify-cluster.yaml"
+        mode: "0644"
+
+    - name: Create the verification cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        src: "{{ repo_root }}/k8s/mysql/verify-cluster.yaml"
+
+    - name: Wait for the verification cluster to come up empty
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        kind: Pod
+        namespace: "{{ mysql_namespace }}"
+        label_selectors:
+          - app.kubernetes.io/instance={{ verify_cluster_name }}
+          - app.kubernetes.io/component=database
+      register: t12_pods
+      until:
+        - t12_pods.resources | length >= 1
+        - t12_pods.resources | rejectattr('status.phase', 'equalto', 'Running') | list | length == 0
+      retries: 90
+      delay: 10
+
+    - name: Start a write workload on the live cluster
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.post_backup_writes
+             (id INT AUTO_INCREMENT PRIMARY KEY, at DATETIME(6));
+           INSERT INTO {{ sysbench_database }}.post_backup_writes (at)
+             SELECT UTC_TIMESTAMP(6) FROM {{ sysbench_database }}.sbtest1 LIMIT 20000;
+           SELECT CONCAT('WRITES_AFTER_BACKUP=', COUNT(*)) FROM {{ sysbench_database }}.post_backup_writes;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t12_writes
+      changed_when: true
+
+    - name: Restore the backup into the verification cluster from MinIO
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t12-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ verify_cluster_name }}"
+            backupSource:
+              destination: "{{ t12_base.resources[0].status.destination }}"
+              storage:
+                type: s3
+                s3:
+                  bucket: "{{ backup_bucket }}"
+                  credentialsSecret: "{{ minio_credentials_secret }}"
+                  endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
+                  region: us-east-1
+
+    - name: Wait for the cross-cluster restore
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t12-restore
+      register: t12_rst
+      until:
+        - t12_rst.resources | length == 1
+        - (t12_rst.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 160
+      delay: 15
+
+    - name: Require the cross-cluster restore to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t12_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "Restore into {{ verify_cluster_name }} failed: {{ t12_rst.resources[0].status | default({}) }}"
+
+    - name: Wait for the restored node to serve SQL
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ verify_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT 1" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t12_ping
+      changed_when: false
+      retries: 40
+      delay: 15
+      until: t12_ping.rc == 0
+
+    - name: Show what the restored copy knows before replication starts
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        V="{{ verify_cluster_name }}-mysql-0"
+        q() { kubectl -n {{ mysql_namespace }} exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        echo "RESTORED_GTID_PURGED=$(q 'SELECT @@GLOBAL.gtid_purged')"
+        echo "RESTORED_TABLES=$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%'")"
+        echo "RESTORED_POST_BACKUP_ROWS=$(q "SELECT IFNULL((SELECT COUNT(*) FROM {{ sysbench_database }}.post_backup_writes), 0)" 2>/dev/null || echo 0)"
+      args:
+        executable: /bin/bash
+      register: t12_pre_repl
+      changed_when: false
+
+    - name: Point the restored copy at the live primary and start replicating
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        V="{{ verify_cluster_name }}-mysql-0"
+        REPL_PASS=$(kubectl -n "$NS" get secret internal-{{ mysql_cluster_name }} -o jsonpath='{.data.replication}' | base64 -d)
+        SOURCE_HOST="{{ mysql_cluster_name }}-mysql-0.{{ mysql_cluster_name }}-mysql.$NS.svc.cluster.local"
+        kubectl -n "$NS" exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -e \
+          "STOP REPLICA;
+           CHANGE REPLICATION SOURCE TO
+             SOURCE_HOST='$SOURCE_HOST',
+             SOURCE_PORT=3306,
+             SOURCE_USER='replication',
+             SOURCE_PASSWORD='$REPL_PASS',
+             SOURCE_SSL=1,
+             SOURCE_AUTO_POSITION=1;
+           START REPLICA;"
+        echo "SOURCE_HOST=$SOURCE_HOST"
+      args:
+        executable: /bin/bash
+      register: t12_change_source
+      changed_when: true
+
+    - name: Wait for the restored copy to catch up
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        V="{{ verify_cluster_name }}-mysql-0"
+        kubectl -n {{ mysql_namespace }} exec "$V" -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -e "SHOW REPLICA STATUS\G" \
+          | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source|Last_Error|Retrieved_Gtid_Set|Executed_Gtid_Set' \
+          | sed 's/^ *//' | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t12_repl
+      changed_when: false
+      until:
+        - t12_repl.stdout is search('Replica_IO_Running: Yes')
+        - t12_repl.stdout is search('Replica_SQL_Running: Yes')
+        - t12_repl.stdout is search('Seconds_Behind_Source: 0')
+      retries: "{{ verify_catchup_retries }}"
+      delay: "{{ verify_catchup_delay }}"
+
+    - name: Compare both clusters once the writes have stopped
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        L="{{ mysql_cluster_name }}-mysql-0"
+        V="{{ verify_cluster_name }}-mysql-0"
+        ql() { kubectl -n "$NS" exec "$L" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        qv() { kubectl -n "$NS" exec "$V" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        sleep 15
+        echo "LIVE_POST_BACKUP_ROWS=$(ql "SELECT COUNT(*) FROM {{ sysbench_database }}.post_backup_writes")"
+        echo "REPLICA_POST_BACKUP_ROWS=$(qv "SELECT COUNT(*) FROM {{ sysbench_database }}.post_backup_writes")"
+        mismatch=0
+        for i in $(seq 1 {{ sysbench_tables }}); do
+          a=$(ql "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i" | awk '{print $2}')
+          b=$(qv "CHECKSUM TABLE {{ sysbench_database }}.sbtest$i" | awk '{print $2}')
+          echo "CHECKSUM sbtest$i live=$a replica=$b"
+          [ "$a" = "$b" ] || mismatch=$((mismatch+1))
+        done
+        echo "CHECKSUM_MISMATCHES=$mismatch"
+        echo "LIVE_GTID=$(ql 'SELECT @@GLOBAL.gtid_executed')"
+        echo "REPLICA_GTID=$(qv 'SELECT @@GLOBAL.gtid_executed')"
+      args:
+        executable: /bin/bash
+      register: t12_compare
+      changed_when: false
+
+    - name: Require a caught-up, byte-identical replica
+      ansible.builtin.assert:
+        that:
+          - "'CHECKSUM_MISMATCHES=0' in t12_compare.stdout"
+          - (t12_compare.stdout_lines | select('match', '^REPLICA_POST_BACKUP_ROWS=') | first).split('=')[1] | int
+            == (t12_compare.stdout_lines | select('match', '^LIVE_POST_BACKUP_ROWS=') | first).split('=')[1] | int
+          - (t12_compare.stdout_lines | select('match', '^REPLICA_POST_BACKUP_ROWS=') | first).split('=')[1] | int > 0
+        fail_msg: >-
+          The restored copy is not a faithful replica: {{ t12_compare.stdout }}
+```
+
+- `scenario_id: t12`, `scenario_title: Restore into a new cluster, attach as a replica, catch up`.
+- Evidence: `t12_secrets.stdout_lines + t12_writes.stdout_lines + ['RESTORE_STATE=' ~ state] + t12_pre_repl.stdout_lines + t12_change_source.stdout_lines + t12_repl.stdout_lines + t12_compare.stdout_lines`.
+
+The `always` block:
+
+```yaml
+  always:
+    - name: Delete the verification cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQL
+        namespace: "{{ mysql_namespace }}"
+        name: "{{ verify_cluster_name }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: Delete the verification restore object and copied secrets
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        namespace: "{{ mysql_namespace }}"
+        name: "{{ item.name }}"
+      loop:
+        - {api: "ps.percona.com/v1", kind: "PerconaServerMySQLRestore", name: "t12-restore"}
+        - {api: "v1", kind: "Secret", name: "{{ verify_cluster_name }}-secrets"}
+        - {api: "v1", kind: "Secret", name: "internal-{{ verify_cluster_name }}"}
+        - {api: "v1", kind: "Secret", name: "{{ verify_cluster_name }}-ssl"}
+      failed_when: false
+
+    - name: Delete the verification cluster's PVCs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} delete pvc \
+          -l app.kubernetes.io/instance={{ verify_cluster_name }} --ignore-not-found
+      args:
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+```
+
+- [ ] **Step 6: Write the t12 playbook**
+
+`ansible/playbooks/tests/t12-restore-as-replica.yml`, following Task 4 Step 5, with role `t12_restore_as_replica`.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `make test`
+Expected: PASS.
+
+- [ ] **Step 8: Syntax-check the whole suite**
+
+Run: `cd ansible && ../.venv/bin/ansible-playbook --syntax-check playbooks/tests/all.yml`
+Expected: no syntax errors — every role referenced by `all.yml` now exists.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add -A
+git commit -m "Add the restore-as-replica verification scenario"
+```
+
+---
+
+### Task 9: Deploy the lab and run the suite for real
+
+Nothing before this point has touched a live cluster. This task produces the measured results the documentation is built from.
+
+**Files:**
+- Modify: whatever the run proves wrong (roles, timeouts, assertions)
+- Create: `docs/results/<run_id>.jsonl`, `docs/results/<run_id>-run.md`
+
+**Interfaces:**
+- Consumes: everything from Tasks 1–8.
+- Produces: a completed run report at `docs/results/<run_id>-run.md`, and the `run_id` value that Task 10 quotes.
+
+- [ ] **Step 1: Tear down the stale cluster**
+
+The kind cluster from the earlier replication lab is still running and in CrashLoopBackOff; it must not be reused.
+
+Run: `make teardown`
+Expected: `kind delete cluster --name mysql-lab` succeeds and `.kube/config` is removed.
+
+- [ ] **Step 2: Deploy fresh**
+
+Run: `make deploy`
+Expected: PLAY RECAP with `failed=0`. Then confirm PITR actually came up:
+
+```bash
+export KUBECONFIG="$PWD/.kube/config"
+kubectl -n mysql get pods
+kubectl -n mysql get ps lab -o jsonpath='{.spec.backup.pitr}{"\n"}'
+```
+Expected: a binlog-server pod Running alongside the two MySQL pods, HAProxy and Orchestrator.
+
+If the binlog server does not appear, check the operator log (`kubectl -n mysql logs deploy/ps-operator | tail -50`) before going further — the PITR scenarios cannot pass without it.
+
+- [ ] **Step 3: Load the dataset**
+
+Run: `make load-data && make verify`
+Expected: 10 sysbench tables, size between `data_size_min_mb` and `data_size_max_mb`, replica IO and SQL both ON.
+
+- [ ] **Step 4: Confirm binlogs are reaching MinIO before testing recovery**
+
+```bash
+kubectl -n mysql run mc-check --rm -i --restart=Never --quiet --image=minio/mc:RELEASE.2024-11-21T17-21-54Z --command -- \
+  sh -c 'mc alias set local http://minio:9000 minio minio12345 >/dev/null; mc ls --recursive local/mysql-lab-binlogs | tail'
+```
+Expected: at least one object. An empty binlog bucket means PITR is not actually streaming; fix that before running the suite.
+
+- [ ] **Step 5: Run the full suite**
+
+Run: `make test-backups 2>&1 | tee /tmp/suite-run.log`
+Expected: twelve scenarios recorded, a report at `docs/results/<run_id>-run.md`.
+
+Note the `run_id` printed at the start — Task 10 references it.
+
+- [ ] **Step 6: Fix what the run proves wrong, one scenario at a time**
+
+For each failing scenario: read its evidence in the report, then investigate the actual cluster state (`kubectl -n mysql get ps,pods`, `kubectl -n mysql describe psrestore <name>`, `kubectl -n mysql logs job/<xb-...>`, the operator log). Fix the role, re-run just that scenario with `make test-tNN RUN_ID=<same run_id>`, and confirm.
+
+Rules for this step:
+
+- Fix the code or fix the expectation, never the evidence. If the operator's real behaviour differs from what the assertion expected, change the assertion **and** note the discovery — it is documentation material.
+- If a scenario cannot be made to pass, leave it recorded as failed with its evidence intact and document why in Task 10. A suite that honestly reports 11/12 is worth more than one that was reshaped until it went green.
+- Likely trouble spots, based on the CRD review: the `status.destination` string format used by the t03 prefix regex; whether the operator prunes on `keep` within the t06 pause; whether an out-of-range PITR target fails or silently degrades in t11; and, most of all, the secret copying and cross-cluster restore in t12.
+
+- [ ] **Step 7: Re-run the whole suite end to end once it is green**
+
+Run: `make test-backups 2>&1 | tee /tmp/suite-final.log`
+Expected: a single clean `run_id` whose report covers all twelve scenarios in one pass. This is the run the blog post quotes — a report stitched together from a dozen partial re-runs is not a result.
+
+- [ ] **Step 8: Commit the run**
+
+```bash
+git add -A
+git commit -m "Record a full backup, restore and PITR suite run"
+```
+
+---
+
+### Task 10: Documentation
+
+Rewrite the lab's documentation around backup verification, using only numbers from the Task 9 run.
+
+**Files:**
+- Rewrite: `README.md`, `docs/blog-draft.md`, `docs/diagrams/architecture.mmd`
+- Create: `docs/backup-architecture.md`, `docs/test-catalogue.md`
+- Delete: `docs/how-it-works.md` (replaced by `docs/backup-architecture.md`)
+- Modify: `docs/diagrams/README.md`
+- Test: `tests/test_lab_config.py`
+
+**Interfaces:**
+- Consumes: `docs/results/<run_id>-run.md` from Task 9.
+- Produces: the finished lab documentation.
+
+- [ ] **Step 1: Write the failing documentation test**
+
+Replace the removed `test_docs_describe_force_delete_failover_not_sigstop` with:
+
+```python
+    def test_docs_are_about_backup_verification(self) -> None:
+        readme = (ROOT / "README.md").read_text()
+        arch = (ROOT / "docs" / "backup-architecture.md").read_text()
+        catalogue = (ROOT / "docs" / "test-catalogue.md").read_text()
+        blog = (ROOT / "docs" / "blog-draft.md").read_text()
+
+        self.assertFalse((ROOT / "docs" / "how-it-works.md").exists())
+        self.assertIn("20260911-mysql-replication-backups", readme)
+        self.assertNotIn("20260910-mysql-replication-setup/", readme)
+
+        for doc in (readme, arch, catalogue, blog):
+            self.assertIn("PITR", doc + doc.upper())
+
+        # every scenario is documented, and the catalogue says how to run each one
+        for sid, _ in self.SCENARIOS:
+            self.assertIn(sid, catalogue, f"{sid} missing from the catalogue")
+            self.assertIn(f"make test-{sid}", catalogue)
+
+        # the thesis has to be stated, not implied
+        for doc in (readme, blog):
+            self.assertIn("replica", doc.lower())
+        self.assertIn("binlog server", arch.lower())
+        self.assertIn("internal-", arch)
+
+        # results are real and referenced
+        results = sorted((ROOT / "docs" / "results").glob("*-run.md"))
+        self.assertTrue(results, "no measured run report in docs/results/")
+        self.assertIn(results[-1].name, blog + catalogue + readme)
+
+    def test_docs_have_no_placeholders(self) -> None:
+        for name in ("README.md", "docs/backup-architecture.md",
+                     "docs/test-catalogue.md", "docs/blog-draft.md"):
+            text = (ROOT / name).read_text()
+            for bad in ("TODO", "TBD", "XXX", "<fill", "PLACEHOLDER", "Lorem"):
+                self.assertNotIn(bad, text, f"{name} still contains {bad}")
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make test`
+Expected: FAIL — `docs/backup-architecture.md` does not exist.
+
+- [ ] **Step 3: Write `docs/backup-architecture.md`**
+
+Sections, in order:
+
+1. **What the operator actually does when you ask for a backup** — the `PerconaServerMySQLBackup` object, the `xb-*` job it spawns, XtraBackup streaming to S3, and where `status.destination` points. Quote the real destination string from the run.
+2. **The binlog server** — what `backup.pitr.binlogServer` deploys, that it registers as a replica (`serverId`) and streams binary logs to `mysql-lab-binlogs`, the meaning of `checkpointInterval` and `checkpointSize`, and why a PITR window is bounded by the oldest full backup and the streamed binlogs, not by the binlogs alone.
+3. **Restore in place** — that the operator stops the cluster, restores the datadir, and rebuilds replicas; the downtime this implies.
+4. **Point-in-time recovery** — `pitr.type: date` versus `gtid`, the exact date format, and what the run showed about inclusivity of the GTID target.
+5. **Restore into a different cluster** — `backupSource.destination`, and the secret-copying requirement, with the failure mode spelled out: the restored datadir carries the source cluster's `mysql.user` table, so a new cluster with fresh credentials cannot authenticate against its own restored data.
+6. **Why replication is the real test** — `gtid_purged` is restored by XtraBackup, which is what makes `SOURCE_AUTO_POSITION=1` work with no coordinates; a replica that reaches `Seconds_Behind_Source: 0` and matches on `CHECKSUM TABLE` has proved the backup was consistent, complete and usable in a way no green job status can.
+
+Three mermaid diagrams in `docs/diagrams/architecture.mmd` and embedded here: the backup path, the PITR restore path, and the restore-as-replica path. Update `docs/diagrams/README.md` to describe the new diagrams.
+
+- [ ] **Step 4: Write `docs/test-catalogue.md`**
+
+A section per scenario, in order t01–t12, each with: what it proves, how it does it, what it asserts, the measured duration from the run, and its `make test-tNN` command. Open with a table mapping the three groups — produced (01–06), restores in place (07–11), verified (12) — and state plainly that only the last group is verification.
+
+- [ ] **Step 5: Rewrite `README.md`**
+
+Structure: what the lab is and the one claim it makes; the component table (kind, operator 1.2.0, Percona Server 8.4, XtraBackup, binlog server, MinIO, Prometheus/Grafana); prerequisites; quick start (`bootstrap`, `deploy`, `load-data`, `verify`, `test-backups`); the twelve scenarios as a short table linking to the catalogue; service endpoints; where results land; lab-only credentials. Fix every path reference to `20260911-mysql-replication-backups/`.
+
+- [ ] **Step 6: Rewrite `docs/blog-draft.md`**
+
+The narrative, built from the measured run:
+
+- Hook: a green backup schedule is not a backup strategy. Most teams learn this during an incident.
+- What the lab is, in one paragraph, with the component list.
+- The three groups of scenarios, with the measured results table lifted from the run report.
+- The two findings that carry the post: what PITR to a timestamp and to a GTID actually did, and what happened when the backup was restored into a fresh cluster and told to replicate — including the secret-copying trap and the catch-up numbers.
+- Anything that failed or surprised, stated plainly.
+- Closing: the checklist a reader should take away — restore on a schedule, restore somewhere else, attach it as a replica, compare checksums.
+
+Quote the run report by name so a reader can find the raw evidence.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `make test`
+Expected: PASS.
+
+- [ ] **Step 8: Read the documentation once more against the run report**
+
+Open `docs/results/<run_id>-run.md` beside each document and check every number, duration, table count and quoted line appears in the report. Any number that does not is either wrong or unverified — remove it or go measure it.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add -A
+git commit -m "Document the backup verification lab and its measured results"
+```
+
+---
+
+## Notes for the executor
+
+- Run everything from `20260911-mysql-replication-backups/`. The Ansible playbooks derive `repo_root` from `playbook_dir`; test playbooks live one level deeper than the existing ones, so their `kubeconfig_path` uses `../../..` where the existing playbooks use `../..`.
+- `make test` is the offline structural suite and must stay fast. It never touches Kubernetes.
+- Tasks 1–8 are pure authoring and can be completed without a cluster. Task 9 is the first time anything runs for real, and it is where the plan expects to be corrected by reality.
+- When reality and the plan disagree, reality wins and the documentation records what reality said.
