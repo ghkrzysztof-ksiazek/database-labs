@@ -103,7 +103,9 @@
 
     - name: Keep the full backup size
       ansible.builtin.set_fact:
-        t03_full_du: "{{ mc_out.stdout | trim }}"
+        t03_full_bytes: >-
+          {{ ((mc_out.stdout | trim) if (mc_out.stdout | trim) is mapping
+              else ((mc_out.stdout | trim) | from_json)).size | int }}
 
     - name: Size the incremental backup in MinIO
       ansible.builtin.include_role:
@@ -114,16 +116,18 @@
 
     - name: Keep the incremental backup size
       ansible.builtin.set_fact:
-        t03_incr_du: "{{ mc_out.stdout | trim }}"
+        t03_incr_bytes: >-
+          {{ ((mc_out.stdout | trim) if (mc_out.stdout | trim) is mapping
+              else ((mc_out.stdout | trim) | from_json)).size | int }}
 
     - name: Require the incremental to be smaller than the full
       ansible.builtin.assert:
         that:
-          - (t03_incr_du | from_json).size | int > 0
-          - (t03_incr_du | from_json).size | int < (t03_full_du | from_json).size | int
+          - (t03_incr_bytes | int) > 0
+          - (t03_incr_bytes | int) < (t03_full_bytes | int)
         fail_msg: >-
           Incremental is not smaller than the full.
-          full={{ t03_full_du }} incremental={{ t03_incr_du }}
+          full={{ t03_full_bytes }} bytes, incremental={{ t03_incr_bytes }} bytes
 
     - name: Record t03 as passed
       ansible.builtin.include_role:
@@ -139,10 +143,10 @@
              + ['BASE_BACKUP=t01-full']
              + ['FULL_DESTINATION=' ~ t03_base.resources[0].status.destination]
              + ['INCR_DESTINATION=' ~ t03_bkp.resources[0].status.destination]
-             + ['FULL_BYTES=' ~ ((t03_full_du | from_json).size)]
-             + ['INCR_BYTES=' ~ ((t03_incr_du | from_json).size)]
-             + ['INCR_PCT_OF_FULL=' ~ (((t03_incr_du | from_json).size | int * 100)
-                                        // ((t03_full_du | from_json).size | int))] }}
+             + ['FULL_BYTES=' ~ (t03_full_bytes | int)]
+             + ['INCR_BYTES=' ~ (t03_incr_bytes | int)]
+             + ['INCR_PCT_OF_FULL=' ~ (((t03_incr_bytes | int) * 100)
+                                        // (t03_full_bytes | int))] }}
 
   rescue:
     - name: Record t03 as failed

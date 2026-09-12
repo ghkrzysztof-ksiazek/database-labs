@@ -41,7 +41,7 @@
     done
     echo "PRIMARY=$primary"
     echo "REPLICA_OK=$replica_ok"
-    bs=$(kubectl -n "$NS" get pods -l app.kubernetes.io/component=binlog-server \
+    bs=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=binlog-server \
       -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null | tr '\n' ' ')
     echo "BINLOG_SERVER=${bs:-none}"
   args:

@@ -114,6 +114,29 @@ spec:
     configuration: '{"InstancePollSeconds": 2, "RecoveryPeriodBlockSeconds": 15}'
   backup:
     enabled: true
+    pitr:
+      enabled: true
+      binlogServer:
+        size: 1
+        image: percona/percona-server-mysql-operator:1.2.0-binlog-server-0.4.1
+        imagePullPolicy: IfNotPresent
+        serverId: 1001
+        checkpointInterval: 30s
+        checkpointSize: 16M
+        logLevel: info
+        storage:
+          s3:
+            bucket: mysql-lab-binlogs
+            credentialsSecret: minio-backup-credentials
+            endpointUrl: http://minio.mysql.svc.cluster.local:9000
+            region: us-east-1
+            prefix: lab
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
     image: percona/percona-xtrabackup:8.4.0-6.1
     imagePullPolicy: IfNotPresent
     schedule:

@@ -27,50 +27,59 @@
                   storageName: "{{ backup_storage_name }}"
                   type: full
 
-    - name: Wait for the cron to produce more backups than keep allows
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLBackup
-        namespace: "{{ mysql_namespace }}"
-        label_selectors:
-          - percona.com/backup-type=cron
-      register: t06_cron
-      until: >-
-        (t06_cron.resources | default([])
-          | selectattr('metadata.labels', 'defined')
-          | selectattr('metadata.labels["percona.com/backup-ancestor"]', 'search', suite_schedule_name)
-          | list | length) >= ((suite_fast_keep | int) + 1)
-      retries: 80
-      delay: 15
+    - name: Watch the cron produce backups and the operator prune them
+      # Polling for a count races with the pruning it is trying to observe: a
+      # backup can be created and deleted between two polls. So accumulate every
+      # distinct scheduled backup seen, and separately record what survives.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        KEEP={{ suite_fast_keep }}
+        WANT=$((KEEP + 1))
+        list() {
+          kubectl -n "$NS" get ps-backup -l percona.com/backup-type=cron \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.percona\.com/backup-ancestor}{"\n"}{end}' \
+            | awk -v s="{{ suite_schedule_name }}" '$2 ~ s {print $1}' | sort
+        }
+        seen=""
+        deadline=$(( $(date +%s) + 1500 ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+          cur=$(list)
+          for n in $cur; do
+            case " $seen " in *" $n "*) ;; *) seen="$seen $n" ;; esac
+          done
+          n_seen=$(echo $seen | wc -w | tr -d " ")
+          n_cur=$(echo $cur | wc -w | tr -d " ")
+          if [ "$n_seen" -ge "$WANT" ] && [ "$n_cur" -le "$KEEP" ]; then
+            break
+          fi
+          sleep 10
+        done
+        surviving=$(list)
+        pruned=""
+        for n in $seen; do
+          case " $surviving " in *" $n "*) ;; *) pruned="$pruned $n" ;; esac
+        done
+        echo "KEEP=$KEEP"
+        echo "PRODUCED_COUNT=$(echo $seen | wc -w | tr -d ' ')"
+        echo "PRODUCED=$(echo $seen | tr ' ' ',' | sed 's/^,//')"
+        echo "SURVIVING_COUNT=$(echo $surviving | wc -w | tr -d ' ')"
+        echo "SURVIVING=$(echo $surviving | tr '\n' ',' | sed 's/,$//')"
+        echo "PRUNED=$(echo $pruned | tr ' ' ',' | sed 's/^,//')"
+      args:
+        executable: /bin/bash
+      register: t06_watch
+      changed_when: false
 
-    - name: Remember every scheduled backup seen before pruning
+    - name: Read the counts back
       ansible.builtin.set_fact:
-        t06_seen: >-
-          {{ t06_cron.resources
-             | selectattr('metadata.labels["percona.com/backup-ancestor"]', 'search', suite_schedule_name)
-             | map(attribute='metadata.name') | list }}
-
-    - name: Give the operator a pruning cycle
-      ansible.builtin.pause:
-        seconds: 200
-
-    - name: Count what survived
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig_path }}"
-        api_version: ps.percona.com/v1
-        kind: PerconaServerMySQLBackup
-        namespace: "{{ mysql_namespace }}"
-        label_selectors:
-          - percona.com/backup-type=cron
-      register: t06_final
-
-    - name: Name the survivors
-      ansible.builtin.set_fact:
+        t06_produced: >-
+          {{ (t06_watch.stdout_lines | select('match', '^PRODUCED_COUNT=') | first).split('=')[1] | int }}
         t06_surviving: >-
-          {{ t06_final.resources | default([])
-             | selectattr('metadata.labels["percona.com/backup-ancestor"]', 'search', suite_schedule_name)
-             | map(attribute='metadata.name') | list }}
+          {{ (t06_watch.stdout_lines | select('match', '^SURVIVING_COUNT=') | first).split('=')[1] | int }}
+        t06_pruned: >-
+          {{ (t06_watch.stdout_lines | select('match', '^PRUNED=') | first).split('=')[1] | trim }}
 
     - name: List the backup bucket after pruning
       ansible.builtin.include_role:
@@ -82,12 +91,12 @@
     - name: Require retention to have pruned down to keep
       ansible.builtin.assert:
         that:
-          - (t06_seen | length) > (suite_fast_keep | int)
-          - (t06_surviving | length) <= (suite_fast_keep | int)
-          - (t06_seen | difference(t06_surviving) | length) > 0
+          - (t06_produced | int) > (suite_fast_keep | int)
+          - (t06_surviving | int) <= (suite_fast_keep | int)
+          - (t06_pruned | length) > 0
         fail_msg: >-
           Retention did not prune: keep={{ suite_fast_keep }}
-          seen={{ t06_seen }} surviving={{ t06_surviving }}
+          produced={{ t06_produced }} surviving={{ t06_surviving }} pruned='{{ t06_pruned }}'
 
     - name: Record t06 as passed
       ansible.builtin.include_role:
@@ -99,10 +108,8 @@
         scenario_status: passed
         scenario_started: "{{ t_start }}"
         scenario_evidence: >-
-          {{ ['KEEP=' ~ suite_fast_keep, 'SCHEDULE=' ~ suite_fast_schedule]
-             + ['PRODUCED=' ~ (t06_seen | length) ~ ' ' ~ (t06_seen | join(','))]
-             + ['SURVIVING=' ~ (t06_surviving | length) ~ ' ' ~ (t06_surviving | join(','))]
-             + ['PRUNED=' ~ (t06_seen | difference(t06_surviving) | join(','))]
+          {{ ['SCHEDULE=' ~ suite_fast_schedule]
+             + t06_watch.stdout_lines
              + ['--- ' ~ backup_bucket ~ '/' ~ mysql_cluster_name ~ ' ---']
              + mc_out.stdout_lines }}
 

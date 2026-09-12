@@ -20,8 +20,8 @@ xtrabackup_image: "percona/percona-xtrabackup:8.4.0-6.1"
 toolkit_image: "percona/percona-toolkit:3.7.1-4"
 mysqld_exporter_image: "prom/mysqld-exporter:v0.16.0"
 sysbench_image: "ubuntu:24.04"
-minio_image: "minio/minio:RELEASE.2024-12-18T13-15-44Z"
-minio_mc_image: "minio/mc:RELEASE.2024-11-21T17-21-54Z"
+minio_image: "quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z"
+minio_mc_image: "quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z"
 
 mysql_root_user: root
 mysql_root_password: mysql

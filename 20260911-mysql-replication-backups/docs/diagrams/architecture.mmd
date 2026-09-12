@@ -1,39 +1,47 @@
-flowchart TB
-  subgraph laptop [Your laptop]
-    A[Ansible playbooks]
-    D[Docker]
-    H[Host ports 3307 / 3001 / 9091]
-  end
+%% Three paths through the lab. Render with mermaid-cli or paste into a mermaid viewer.
 
-  A -->|kind create cluster| D
-
-  subgraph kind [kind cluster: mysql-lab]
-    CP[control-plane]
-    W1[worker]
-    W2[worker]
-
-    subgraph ns_my [namespace: mysql]
-      OP[Percona ps-operator]
-      ORC[Orchestrator]
-      HAP[HAProxy]
-      M0[MySQL source]
-      M1[MySQL replica]
-      XB[XtraBackup jobs]
-      MINIO[MinIO]
+%% 1. The backup path
+flowchart LR
+  subgraph k8s["kind cluster mysql-lab / namespace mysql"]
+    OP["ps-operator<br/>1.2.0"]
+    subgraph cluster["PerconaServerMySQL lab"]
+      P["lab-mysql-0<br/>source, read_only=0"]
+      R["lab-mysql-1<br/>replica, read_only=1"]
+      BS["lab-binlog-server-0<br/>registers as a replica<br/>serverId 1001"]
     end
-
-    subgraph ns_mon [namespace: monitoring]
-      PROM[Prometheus]
-      GRAF[Grafana]
-    end
+    JOB["xb-* Job<br/>percona-xtrabackup 8.4"]
+    MINIO[("MinIO<br/>mysql-lab-backups<br/>mysql-lab-binlogs")]
   end
+  USER["PerconaServerMySQLBackup"] --> OP
+  OP -- "creates" --> JOB
+  JOB -- "xtrabackup --stream" --> MINIO
+  JOB -. "reads datadir of<br/>source or sourcePod" .-> P
+  JOB -. "or the replica" .-> R
+  P -- "binlog dump stream" --> BS
+  BS -- "checkpoint every 30s / 16M" --> MINIO
 
-  HAP --> M0
-  HAP --> M1
-  M1 -->|GTID binlog stream| M0
-  ORC -->|health + promotion| M0
-  ORC --> M1
-  XB --> MINIO
-  PROM -->|mysqld_exporter :9104| M0
-  PROM --> M1
-  H --> CP
+%% 2. The point-in-time recovery path
+flowchart LR
+  RCR["PerconaServerMySQLRestore<br/>backupName: t09-base<br/>pitr.type: date | gtid"] --> OP2["ps-operator"]
+  OP2 -- "1. stops the cluster" --> C["lab-mysql-*"]
+  OP2 -- "2. restores the full backup" --> C
+  MB[("mysql-lab-backups")] --> OP2
+  OP2 -- "3. replays binlogs up to the target" --> C
+  ML[("mysql-lab-binlogs")] --> OP2
+  OP2 -- "4. restarts and rebuilds replicas" --> C
+
+%% 3. The restore-as-replica verification path — the only real test
+flowchart LR
+  subgraph live["live cluster: lab"]
+    LP["lab-mysql-0<br/>still taking writes"]
+  end
+  subgraph verify["verification cluster: verify"]
+    VP["verify-mysql-0"]
+  end
+  MB2[("mysql-lab-backups<br/>s3://.../lab-<stamp>-full")]
+  LP -- "full backup" --> MB2
+  MB2 -- "restore via backupSource.destination" --> VP
+  SEC["copy lab-secrets and internal-lab<br/>the restored mysql.user table<br/>belongs to the source cluster"] -.-> VP
+  VP -- "CHANGE REPLICATION SOURCE TO<br/>SOURCE_AUTO_POSITION = 1" --> LP
+  LP -- "binlog stream: everything written<br/>since the backup" --> VP
+  VP -- "Seconds_Behind_Source = 0<br/>CHECKSUM TABLE matches" --> DONE(["backup verified"])

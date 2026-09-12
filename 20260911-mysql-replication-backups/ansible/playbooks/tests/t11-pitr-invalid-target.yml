@@ -3,6 +3,7 @@
   hosts: localhost
   gather_facts: false
   vars:
+    repo_root: "{{ (playbook_dir ~ '/../../..') | realpath }}"
     kubeconfig_path: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
   environment:
     PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"

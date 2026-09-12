@@ -1,15 +1,22 @@
 ---
 # Runs `mc_args` in a throwaway minio/mc pod with the `local` alias configured.
 # Callers pass: mc_args, e.g. "mc ls --recursive local/mysql-lab-backups"
+#
+# The script goes in base64-encoded: mc_args frequently contains quotes (awk,
+# tr, sed), and inlining it into `sh -c '...'` breaks the outer quoting.
 - name: "mc: {{ mc_args }}"
   ansible.builtin.shell: |
     set -euo pipefail
     export KUBECONFIG="{{ kubeconfig_path }}"
     kubectl -n {{ mysql_namespace }} run mc-$RANDOM --rm -i --restart=Never --quiet \
-      --image={{ minio_mc_image }} --command -- sh -c \
-      'mc alias set local http://minio:9000 {{ minio_root_user }} {{ minio_root_password }} >/dev/null 2>&1; {{ mc_args }}'
+      --image={{ minio_mc_image }} --command -- \
+      sh -c "echo {{ mc_script | b64encode }} | base64 -d | sh"
   args:
     executable: /bin/bash
+  vars:
+    mc_script: |
+      mc alias set local http://minio:9000 {{ minio_root_user }} {{ minio_root_password }} >/dev/null 2>&1
+      {{ mc_args }}
   register: mc_out
   changed_when: false
   retries: 3
