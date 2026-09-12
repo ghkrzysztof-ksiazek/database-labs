@@ -1,0 +1,12 @@
+---
+- name: "t02 — backup from the replica"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  roles:
+    - test_common
+    - t02_backup_from_replica

@@ -1,0 +1,12 @@
+---
+- name: "t03 — incremental backup on a full base"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:{{ lookup('env', 'PATH') }}"
+    KUBECONFIG: "{{ (playbook_dir ~ '/../../..') | realpath }}/.kube/config"
+  roles:
+    - test_common
+    - t03_backup_incremental

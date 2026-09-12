@@ -1,0 +1,161 @@
+---
+- name: Start the t03 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t03
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Require the t01 full backup as the incremental base
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t01-full
+      register: t03_base
+      failed_when:
+        - (t03_base.resources | default([]) | length) == 0
+          or (t03_base.resources[0].status.state | default('') | lower) not in ['succeeded', 'ready', 'done']
+
+    - name: Write 50k new rows since the base backup
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.t03_delta (id INT AUTO_INCREMENT PRIMARY KEY, pad CHAR(120));
+           INSERT INTO {{ sysbench_database }}.t03_delta (pad)
+             SELECT LEFT(MD5(RAND()), 120) FROM {{ sysbench_database }}.sbtest1 LIMIT 50000;
+           SELECT CONCAT('DELTA_ROWS=', COUNT(*)) FROM {{ sysbench_database }}.t03_delta;" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t03_delta
+      changed_when: true
+
+    - name: Remove any stale t03 backup object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t03-incr
+        wait: true
+        wait_timeout: 180
+
+    - name: Request an incremental backup on the full base
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLBackup
+          metadata:
+            name: t03-incr
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: incremental
+            incrementalBaseBackupName: t01-full
+
+    - name: Wait for the incremental backup to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t03-incr
+      register: t03_bkp
+      until:
+        - t03_bkp.resources | length == 1
+        - (t03_bkp.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 120
+      delay: 10
+
+    - name: Require the incremental backup to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t03_bkp.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+          - (t03_bkp.resources[0].status.type | default('')) | lower == 'incremental'
+        fail_msg: "Incremental backup did not succeed: {{ t03_bkp.resources[0].status | default({}) }}"
+
+    - name: Derive the MinIO prefixes for both backups
+      ansible.builtin.set_fact:
+        t03_full_prefix: >-
+          {{ t03_base.resources[0].status.destination
+             | regex_replace('^s3://' ~ backup_bucket ~ '/', '') }}
+        t03_incr_prefix: >-
+          {{ t03_bkp.resources[0].status.destination
+             | regex_replace('^s3://' ~ backup_bucket ~ '/', '') }}
+
+    - name: Size the full backup in MinIO
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: mc.yml
+      vars:
+        mc_args: "mc du --json local/{{ backup_bucket }}/{{ t03_full_prefix | trim }} | tail -1"
+
+    - name: Keep the full backup size
+      ansible.builtin.set_fact:
+        t03_full_du: "{{ mc_out.stdout | trim }}"
+
+    - name: Size the incremental backup in MinIO
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: mc.yml
+      vars:
+        mc_args: "mc du --json local/{{ backup_bucket }}/{{ t03_incr_prefix | trim }} | tail -1"
+
+    - name: Keep the incremental backup size
+      ansible.builtin.set_fact:
+        t03_incr_du: "{{ mc_out.stdout | trim }}"
+
+    - name: Require the incremental to be smaller than the full
+      ansible.builtin.assert:
+        that:
+          - (t03_incr_du | from_json).size | int > 0
+          - (t03_incr_du | from_json).size | int < (t03_full_du | from_json).size | int
+        fail_msg: >-
+          Incremental is not smaller than the full.
+          full={{ t03_full_du }} incremental={{ t03_incr_du }}
+
+    - name: Record t03 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t03
+        scenario_title: Incremental backup on a full base
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: >-
+          {{ t03_delta.stdout_lines
+             + ['BASE_BACKUP=t01-full']
+             + ['FULL_DESTINATION=' ~ t03_base.resources[0].status.destination]
+             + ['INCR_DESTINATION=' ~ t03_bkp.resources[0].status.destination]
+             + ['FULL_BYTES=' ~ ((t03_full_du | from_json).size)]
+             + ['INCR_BYTES=' ~ ((t03_incr_du | from_json).size)]
+             + ['INCR_PCT_OF_FULL=' ~ (((t03_incr_du | from_json).size | int * 100)
+                                        // ((t03_full_du | from_json).size | int))] }}
+
+  rescue:
+    - name: Record t03 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t03
+        scenario_title: Incremental backup on a full base
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t03
+      ansible.builtin.fail:
+        msg: "t03 failed: {{ ansible_failed_result.msg | default('see above') }}"

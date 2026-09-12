@@ -1,0 +1,119 @@
+---
+- name: Start the t01 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t01
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Remove any stale t01 backup object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t01-full
+        wait: true
+        wait_timeout: 180
+
+    - name: Record the dataset the backup will capture
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('TABLES=', COUNT(*)) FROM information_schema.tables
+             WHERE table_schema='{{ sysbench_database }}' AND table_name LIKE 'sbtest%';
+           SELECT CONCAT('SIZE_MB=', IFNULL(ROUND(SUM(data_length+index_length)/1024/1024),0))
+             FROM information_schema.tables WHERE table_schema='{{ sysbench_database }}';
+           SELECT CONCAT('GTID_AT_BACKUP=', @@GLOBAL.gtid_executed);" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: pre
+      changed_when: false
+
+    - name: Request a full backup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLBackup
+          metadata:
+            name: t01-full
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: full
+
+    - name: Wait for the full backup to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t01-full
+      register: t01_bkp
+      until:
+        - t01_bkp.resources | length == 1
+        - (t01_bkp.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 120
+      delay: 10
+
+    - name: Require the full backup to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t01_bkp.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+          - t01_bkp.resources[0].status.destination | default('') | length > 0
+          - backup_bucket in t01_bkp.resources[0].status.destination
+        fail_msg: "Full backup did not succeed: {{ t01_bkp.resources[0].status | default({}) }}"
+
+    - name: Measure the backup in MinIO
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: mc.yml
+      vars:
+        mc_args: "mc du local/{{ backup_bucket }}/{{ mysql_cluster_name }} 2>/dev/null | tail -1"
+
+    - name: Assemble the t01 evidence
+      ansible.builtin.set_fact:
+        t01_evidence: >-
+          {{ pre.stdout_lines
+             + ['BACKUP_STATE=' ~ t01_bkp.resources[0].status.state]
+             + ['BACKUP_TYPE=' ~ (t01_bkp.resources[0].status.type | default('full'))]
+             + ['BACKUP_DESTINATION=' ~ t01_bkp.resources[0].status.destination]
+             + ['BACKUP_COMPLETED=' ~ (t01_bkp.resources[0].status.completed | default('n/a'))]
+             + ['MINIO_USAGE=' ~ (mc_out.stdout | trim)] }}
+
+    - name: Record t01 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t01
+        scenario_title: On-demand full backup to MinIO
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ t01_evidence }}"
+
+  rescue:
+    - name: Record t01 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t01
+        scenario_title: On-demand full backup to MinIO
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t01
+      ansible.builtin.fail:
+        msg: "t01 failed: {{ ansible_failed_result.msg | default('see above') }}"

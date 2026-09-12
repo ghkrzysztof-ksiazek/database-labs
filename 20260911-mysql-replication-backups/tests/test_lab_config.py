@@ -252,5 +252,26 @@ class LabConfigTests(unittest.TestCase):
             self.assertIn(f"test-{sid}", makefile, f"make test-{sid} missing")
 
 
+    def test_every_scenario_has_a_role_and_playbook(self) -> None:
+        for sid, slug in self.SCENARIOS[:3]:
+            role = ANSIBLE / "roles" / f"{sid}_{slug.replace('-', '_')}" / "tasks" / "main.yml"
+            play = PLAYBOOKS / "tests" / f"{sid}-{slug}.yml"
+            self.assertTrue(role.is_file(), f"missing role tasks for {sid}")
+            self.assertTrue(play.is_file(), f"missing playbook for {sid}")
+            text = role.read_text()
+            self.assertIn("record_result.yml", text)
+            self.assertIn("rescue", text)
+            self.assertIn(f"scenario_id: {sid}", text)
+
+    def test_backup_scenarios_cover_full_replica_and_incremental(self) -> None:
+        t01 = (ANSIBLE / "roles" / "t01_backup_full" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: full", t01)
+        t02 = (ANSIBLE / "roles" / "t02_backup_from_replica" / "tasks" / "main.yml").read_text()
+        self.assertIn("sourcePod", t02)
+        t03 = (ANSIBLE / "roles" / "t03_backup_incremental" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: incremental", t03)
+        self.assertIn("incrementalBaseBackupName", t03)
+
+
 if __name__ == "__main__":
     unittest.main()
