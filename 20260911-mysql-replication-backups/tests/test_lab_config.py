@@ -253,7 +253,7 @@ class LabConfigTests(unittest.TestCase):
 
 
     def test_every_scenario_has_a_role_and_playbook(self) -> None:
-        for sid, slug in self.SCENARIOS[:8]:
+        for sid, slug in self.SCENARIOS[:11]:
             role = ANSIBLE / "roles" / f"{sid}_{slug.replace('-', '_')}" / "tasks" / "main.yml"
             play = PLAYBOOKS / "tests" / f"{sid}-{slug}.yml"
             self.assertTrue(role.is_file(), f"missing role tasks for {sid}")
@@ -291,6 +291,20 @@ class LabConfigTests(unittest.TestCase):
         t08 = (ANSIBLE / "roles" / "t08_restore_dropped_table" / "tasks" / "main.yml").read_text()
         self.assertIn("DROP TABLE", t08)
         self.assertIn("sbtest10", t08)
+
+
+    def test_pitr_scenarios_use_both_target_types(self) -> None:
+        v = load_group_vars()
+        self.assertGreaterEqual(int(v["pitr_settle_seconds"]), 60)
+        t09 = (ANSIBLE / "roles" / "t09_pitr_timestamp" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: date", t09)
+        self.assertIn("UTC_TIMESTAMP", t09)
+        t10 = (ANSIBLE / "roles" / "t10_pitr_gtid" / "tasks" / "main.yml").read_text()
+        self.assertIn("type: gtid", t10)
+        self.assertIn("gtid_executed", t10)
+        t11 = (ANSIBLE / "roles" / "t11_pitr_invalid_target" / "tasks" / "main.yml").read_text()
+        self.assertIn("failed", t11)
+        self.assertIn("health_gate.yml", t11)
 
 
 if __name__ == "__main__":

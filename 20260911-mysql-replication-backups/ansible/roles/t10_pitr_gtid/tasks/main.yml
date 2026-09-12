@@ -1,0 +1,231 @@
+---
+- name: Start the t10 clock
+  ansible.builtin.set_fact:
+    t_start: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- block:
+    - name: Gate on cluster health before t10
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Remove any stale t10 base backup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t10-base
+        wait: true
+        wait_timeout: 180
+
+    - name: Request the t10 base backup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLBackup
+          metadata:
+            name: t10-base
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            storageName: "{{ backup_storage_name }}"
+            type: full
+
+    - name: Wait for the t10 base backup
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLBackup
+        namespace: "{{ mysql_namespace }}"
+        name: t10-base
+      register: t10_base
+      until:
+        - t10_base.resources | length == 1
+        - (t10_base.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 120
+      delay: 10
+
+    - name: Require the base backup
+      ansible.builtin.assert:
+        that:
+          - (t10_base.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "t10 base backup failed: {{ t10_base.resources[0].status | default({}) }}"
+
+    - name: Find the writable primary
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        for p in $(kubectl -n "$NS" get pods -l app.kubernetes.io/instance={{ mysql_cluster_name }},app.kubernetes.io/component=database \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort); do
+          ro=$(kubectl -n "$NS" exec "$p" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "SELECT @@read_only" 2>/dev/null | tr -d '\r')
+          if [ "$ro" = "0" ]; then echo "$p"; exit 0; fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: t10_primary
+      changed_when: false
+
+    - name: Write good data, capture the GTID, then commit the destructive statement
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        NS="{{ mysql_namespace }}"
+        POD="{{ t10_primary.stdout | trim }}"
+        q() { kubectl -n "$NS" exec "$POD" -c mysql -- mysql -uroot -p{{ mysql_root_password }} -N -e "$1" | tr -d '\r'; }
+        q "CREATE TABLE IF NOT EXISTS {{ sysbench_database }}.gtid_markers
+             (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32))"
+        q "DELETE FROM {{ sysbench_database }}.gtid_markers"
+        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('keep-me')"
+        echo "ROWS_BEFORE_DAMAGE=$(q "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest9")"
+        echo "GTID_TARGET=$(q "SELECT @@GLOBAL.gtid_executed" | tr -d '\n')"
+        sleep 20
+        q "DELETE FROM {{ sysbench_database }}.sbtest9"
+        q "INSERT INTO {{ sysbench_database }}.gtid_markers (label) VALUES ('after-damage')"
+        echo "ROWS_AFTER_DAMAGE=$(q "SELECT COUNT(*) FROM {{ sysbench_database }}.sbtest9")"
+      args:
+        executable: /bin/bash
+      register: t10_markers
+      changed_when: true
+
+    - name: Let the binlog server checkpoint both markers to MinIO
+      ansible.builtin.pause:
+        seconds: "{{ pitr_settle_seconds }}"
+
+    - name: Extract the GTID target
+      ansible.builtin.set_fact:
+        t10_target: >-
+          {{ (t10_markers.stdout_lines | select('match', '^GTID_TARGET=') | first).split('=', 1)[1] | trim }}
+
+    - name: Remove any stale t10 restore object
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: absent
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t10-restore
+        wait: true
+        wait_timeout: 180
+
+    - name: Recover to the captured GTID set
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: ps.percona.com/v1
+          kind: PerconaServerMySQLRestore
+          metadata:
+            name: t10-restore
+            namespace: "{{ mysql_namespace }}"
+          spec:
+            clusterName: "{{ mysql_cluster_name }}"
+            backupName: t10-base
+            pitr:
+              type: gtid
+              gtid: "{{ t10_target }}"
+              backupSource:
+                binlogServer:
+                  image: "{{ binlog_server_image }}"
+                  serverId: "{{ binlog_server_id | int + 11 }}"
+                  storage:
+                    s3:
+                      bucket: "{{ binlog_bucket }}"
+                      credentialsSecret: "{{ minio_credentials_secret }}"
+                      endpointUrl: "http://minio.{{ mysql_namespace }}.svc.cluster.local:9000"
+                      region: us-east-1
+                      prefix: "{{ binlog_prefix }}"
+
+    - name: Wait for the PITR restore to finish
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: ps.percona.com/v1
+        kind: PerconaServerMySQLRestore
+        namespace: "{{ mysql_namespace }}"
+        name: t10-restore
+      register: t10_rst
+      until:
+        - t10_rst.resources | length == 1
+        - (t10_rst.resources[0].status.state | default('') | lower)
+          in ['succeeded', 'ready', 'done', 'failed', 'error']
+      retries: 160
+      delay: 15
+
+    - name: Require the PITR restore to have succeeded
+      ansible.builtin.assert:
+        that:
+          - (t10_rst.resources[0].status.state | default('') | lower) in ['succeeded', 'ready', 'done']
+        fail_msg: "PITR to {{ t10_target }} failed: {{ t10_rst.resources[0].status | default({}) }}"
+
+    - name: Gate on cluster health after the PITR restore
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: health_gate.yml
+
+    - name: Inspect the damage after recovery
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG="{{ kubeconfig_path }}"
+        kubectl -n {{ mysql_namespace }} exec {{ mysql_cluster_name }}-mysql-0 -c mysql -- \
+          mysql -uroot -p{{ mysql_root_password }} -N -e \
+          "SELECT CONCAT('ROWS_AFTER_RESTORE=', COUNT(*)) FROM {{ sysbench_database }}.sbtest9;
+           SELECT CONCAT('KEEP_MARKER=', COUNT(*)) FROM {{ sysbench_database }}.gtid_markers WHERE label='keep-me';
+           SELECT CONCAT('DAMAGE_MARKER=', COUNT(*)) FROM {{ sysbench_database }}.gtid_markers WHERE label='after-damage';
+           SELECT CONCAT('GTID_AFTER_RESTORE=', @@GLOBAL.gtid_executed);" | tr -d '\r'
+      args:
+        executable: /bin/bash
+      register: t10_after
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: t10_after.rc == 0
+
+    - name: Require the deletion to be undone and the later marker absent
+      ansible.builtin.assert:
+        that:
+          - (t10_after.stdout_lines | select('match', '^ROWS_AFTER_RESTORE=') | first).split('=')[1] | int
+            == (t10_markers.stdout_lines | select('match', '^ROWS_BEFORE_DAMAGE=') | first).split('=')[1] | int
+          - "'KEEP_MARKER=1' in t10_after.stdout"
+          - "'DAMAGE_MARKER=0' in t10_after.stdout"
+        fail_msg: >-
+          GTID recovery landed wrong. target={{ t10_target }} result={{ t10_after.stdout }}
+
+    - name: Record t10 as passed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t10
+        scenario_title: Point-in-time recovery to a GTID
+        scenario_status: passed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: >-
+          {{ ['BASE_BACKUP=t10-base',
+              'BASE_DESTINATION=' ~ t10_base.resources[0].status.destination]
+             + t10_markers.stdout_lines
+             + ['PITR_TYPE=gtid', 'PITR_TARGET=' ~ t10_target]
+             + ['RESTORE_STATE=' ~ t10_rst.resources[0].status.state]
+             + t10_after.stdout_lines
+             + ['HEALTH=' ~ health_summary] }}
+
+  rescue:
+    - name: Record t10 as failed
+      ansible.builtin.include_role:
+        name: test_common
+        tasks_from: record_result.yml
+      vars:
+        scenario_id: t10
+        scenario_title: Point-in-time recovery to a GTID
+        scenario_status: failed
+        scenario_started: "{{ t_start }}"
+        scenario_evidence: "{{ ansible_failed_result.msg | default('see play output') | string | split('\n') }}"
+
+    - name: Fail the play after recording t10
+      ansible.builtin.fail:
+        msg: "t10 failed: {{ ansible_failed_result.msg | default('see above') }}"

@@ -63,3 +63,5 @@ binlog_server_id: 1001
 suite_schedule_name: suite-fast
 suite_fast_schedule: "*/3 * * * *"
 suite_fast_keep: 2
+
+pitr_settle_seconds: 120
