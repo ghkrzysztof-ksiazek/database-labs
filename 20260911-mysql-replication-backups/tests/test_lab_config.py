@@ -189,5 +189,33 @@ class LabConfigTests(unittest.TestCase):
         self.assertIn("20260911-mysql-replication-backups", index)
 
 
+    def test_cluster_template_enables_pitr_binlog_server(self) -> None:
+        v = load_group_vars()
+        self.assertTrue(v["pitr_enabled"])
+        self.assertEqual(v["binlog_bucket"], "mysql-lab-binlogs")
+        self.assertNotEqual(v["binlog_bucket"], v["backup_bucket"])
+        self.assertIn("binlog-server", v["binlog_server_image"])
+
+        rendered = yaml.safe_load(render_template(TEMPLATES_CLUSTER / "cluster.yaml.j2"))
+        pitr = rendered["spec"]["backup"]["pitr"]
+        self.assertTrue(pitr["enabled"])
+        s3 = pitr["binlogServer"]["storage"]["s3"]
+        self.assertEqual(s3["bucket"], v["binlog_bucket"])
+        self.assertEqual(s3["credentialsSecret"], v["minio_credentials_secret"])
+        self.assertIn("minio", s3["endpointUrl"])
+        self.assertEqual(pitr["binlogServer"]["image"], v["binlog_server_image"])
+
+    def test_cluster_template_omits_pitr_when_disabled(self) -> None:
+        rendered = yaml.safe_load(
+            render_template(TEMPLATES_CLUSTER / "cluster.yaml.j2", {"pitr_enabled": False})
+        )
+        self.assertNotIn("pitr", rendered["spec"]["backup"])
+
+    def test_minio_role_creates_both_buckets(self) -> None:
+        text = (ANSIBLE / "roles" / "minio" / "tasks" / "main.yml").read_text()
+        self.assertIn("binlog_bucket", text)
+        self.assertIn("backup_bucket", text)
+
+
 if __name__ == "__main__":
     unittest.main()

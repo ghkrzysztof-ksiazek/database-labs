@@ -51,3 +51,11 @@ backup_keep: 3
 minio_root_user: minio
 minio_root_password: minio12345
 minio_credentials_secret: minio-backup-credentials
+
+pitr_enabled: true
+binlog_bucket: mysql-lab-binlogs
+binlog_prefix: lab
+binlog_server_image: "percona/percona-server-mysql-operator:1.2.0-binlog-server-0.4.1"
+binlog_checkpoint_interval: 30s
+binlog_checkpoint_size: 16M
+binlog_server_id: 1001

@@ -114,6 +114,31 @@ spec:
     configuration: '{"InstancePollSeconds": 2, "RecoveryPeriodBlockSeconds": 15}'
   backup:
     enabled: true
+{% if pitr_enabled %}
+    pitr:
+      enabled: true
+      binlogServer:
+        size: 1
+        image: {{ binlog_server_image }}
+        imagePullPolicy: IfNotPresent
+        serverId: {{ binlog_server_id }}
+        checkpointInterval: {{ binlog_checkpoint_interval }}
+        checkpointSize: {{ binlog_checkpoint_size }}
+        logLevel: info
+        storage:
+          s3:
+            bucket: {{ binlog_bucket }}
+            credentialsSecret: {{ minio_credentials_secret }}
+            endpointUrl: http://minio.{{ mysql_namespace }}.svc.cluster.local:9000
+            region: us-east-1
+            prefix: {{ binlog_prefix }}
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+{% endif %}
     image: {{ xtrabackup_image }}
     imagePullPolicy: IfNotPresent
     schedule:

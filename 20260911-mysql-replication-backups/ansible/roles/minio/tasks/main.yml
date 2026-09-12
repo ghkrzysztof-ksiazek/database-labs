@@ -61,7 +61,8 @@
                   - |
                     mc alias set local http://minio:9000 "{{ minio_root_user }}" "{{ minio_root_password }}"
                     mc mb --ignore-existing local/{{ backup_bucket }}
-                    mc ls local/{{ backup_bucket }}
+                    mc mb --ignore-existing local/{{ binlog_bucket }}
+                    mc ls local/
 
 - name: Wait for bucket job
   kubernetes.core.k8s_info:
