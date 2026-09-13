@@ -8,7 +8,7 @@ This post walks through that test as we ran it. The live source kept taking writ
 
 ## What this lab is
 
-Local **kind** Kubernetes, **Percona Operator for MySQL 1.2.0**, **Percona Server 8.4.10-10.1**, async GTID replication (one source, one replica), **XtraBackup** into in-cluster **MinIO**. The dataset is sysbench `oltp_read_write` prepare: **10 tables × 200,000 rows**. PITR uses a binlog server streaming to a second MinIO bucket. Orchestrator is installed and is not this post's subject.
+Local **kind** Kubernetes, **Percona Operator for MySQL 1.2.0**, **Percona Server 8.4.10-10.1**, async **GTID** (global transaction identifier) replication (one source, one replica), **XtraBackup** (a physical backup of the MySQL data directory) into in-cluster **MinIO** (S3-compatible object storage). The dataset is sysbench `oltp_read_write` prepare: **10 tables × 200,000 rows**. Point-in-time recovery uses a **binlog server** that registers as a replica and streams binary logs to a second MinIO bucket. Orchestrator is installed and is not this post's subject.
 
 Twelve Ansible scenarios surround the backup path. They are grouped in the [catalogue](test-catalogue.md) as:
 
@@ -43,13 +43,13 @@ flowchart LR
 
 The MinIO node label is schematic. The measured t12 object on the validation run is `s3://mysql-lab-backups/lab/lab-2026-09-12-10:36:24-full`. Source: [`docs/diagrams/restore-as-replica.mmd`](diagrams/restore-as-replica.mmd). Backup creation and binlog streaming: [`architecture.mmd`](diagrams/architecture.mmd). Physical restore plus binlog replay: [`pitr.mmd`](diagrams/pitr.mmd).
 
-## Restore the backup as a replica
+## t12 — Restore into a new cluster, attach as a replica, catch up
 
-The lab scenario is `t12` (`ansible/roles/t12_restore_as_replica/`). It does not depend on an earlier backup; it takes its own full base.
+The lab scenario is `t12` (`ansible/roles/t12_restore_as_replica/`). It does not depend on an earlier backup; it takes its own full base. On the ordered validation run this scenario took **118 s**.
 
 ### 1. Take a full backup and keep both destination and storage
 
-A backup is a `PerconaServerMySQLBackup`. When it finishes, `status.destination` is the object-storage path a *different* cluster can restore from, and `status.storage` is the S3 definition the operator used — including `prefix`.
+A backup is a `PerconaServerMySQLBackup` Kubernetes custom resource (a backup object the operator watches). When it finishes, `status.destination` is the object-storage path a *different* cluster can restore from, and `status.storage` is the S3 definition the operator used — including `prefix`.
 
 On the ordered validation run the t12 base was:
 
@@ -173,6 +173,28 @@ A green restore job cannot give you these four proofs:
 
 Cleanup deletes `verify`, the restore object, the copied secrets, and the PVCs. PASS is recorded only after that and a source health check. The live cluster is still `PRIMARY=lab-mysql-0` with `REPLICA_OK=1`.
 
+### By hand
+
+The playbook is `kubernetes.core.k8s` plus `kubectl exec`. The same sequence without Ansible:
+
+```bash
+export KUBECONFIG=$PWD/.kube/config
+kubectl -n mysql apply -f - <<'EOF'
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  name: t12-base
+  namespace: mysql
+spec:
+  clusterName: lab
+  storageName: minio
+  type: full
+EOF
+kubectl -n mysql get ps-backup t12-base -o jsonpath='{.status.state} {.status.destination}{"\n"}'
+```
+
+Copy `lab-secrets`, `internal-lab`, and `lab-ssl` to the `verify-*` names, create the one-node `verify` cluster, then apply a `PerconaServerMySQLRestore` whose `backupSource.destination` and `backupSource.storage` are taken from that backup's status — not `backupName`. Write the 20,000-row marker on the live primary with `kubectl -n mysql exec lab-mysql-0 -c mysql -- mysql …`. After restore, `kubectl -n mysql exec verify-mysql-0 -c mysql -- mysql` to run `CHANGE REPLICATION SOURCE TO` with `SOURCE_AUTO_POSITION=1`, then `CHECKSUM TABLE` on both sides.
+
 ## Pitfalls that look like a bad backup
 
 - **Secret copy.** If `verify` starts with its own generated passwords, restore authentication fails and the backup looks corrupt. Copy `lab-secrets`, `internal-lab`, and `lab-ssl`. Laptop credentials; not a production pattern.
@@ -196,9 +218,9 @@ The suite is destructive to this local lab: several scenarios rewind the source.
 
 The validation wrap-up also passed all **35** [offline tests](results/20260912T101400Z-validation-offline-tests.log) (`Ran 35 tests in 0.196s`) and [cluster verification](results/20260912T101400Z-validation-health.log) (`replica_io=ON replica_sql=ON`, `Prometheus mysql up ok`). The [environment snapshot](results/20260912T101400Z-validation-environment.json) records image digests, Kubernetes version, and PITR archive configuration.
 
-## Supporting context — the rest of the suite
+## The twelve scenarios, under the hood
 
-All twelve scenarios passed in one ordered run on 12 September 2026. Total recorded scenario time: **1472 s**. These are local-lab timings including waits and checks, not a production benchmark.
+All twelve scenarios passed in one ordered run on 12 September 2026. Total recorded scenario time: **1472 s**. These are local-lab timings including waits and checks, not a production benchmark. Each section below is what the shipped Ansible role actually applies or execs, then the same steps by hand. Run `./scripts/lab.sh t01` through `t12` from this directory; order is load-bearing because several restores need `t01-full` or `t09-base`.
 
 | Scenario | Duration |
 | --- | --- |
@@ -215,17 +237,311 @@ All twelve scenarios passed in one ordered run on 12 September 2026. Total recor
 | t11 — An impossible recovery target fails cleanly | 24 s |
 | t12 — Restore into a new cluster, attach as a replica, catch up | 118 s |
 
-t06's 11 s measures pruning and verification against scheduled backups that already existed from earlier development runs, not the creation of three fresh backups. The removed data prefix was empty; sibling MD5 sidecar `lab-2026-09-12-09:06:38-full.md5` remained.
+## t01 — On-demand full backup to MinIO
 
-**PITR date format.** This binlog-server build accepts UTC timestamps as `YYYY-MM-DDTHH:MM:SS` with **no timezone suffix**. A sample `Z` suffix produces `Invalid timestamp format`. The validation t09 target was `2026-09-12T10:25:07`. t11 asked for `2001-01-01T00:00:00` (valid format, before any backup) and failed with `Timestamp is too old` (`RESTORE_STATE=Error`).
+t01 proves that a `PerconaServerMySQLBackup` custom resource produces a real object in MinIO, not merely a green Kubernetes event. The role records how many sysbench tables and how much data are on `lab-mysql-0`, plus `@@GLOBAL.gtid_executed`, then applies a full backup named `t01-full`. It waits until `status.state` is `Succeeded` and `status.destination` points into the `mysql-lab-backups` bucket, then sizes the cluster prefix with `mc du`. On the validation run that took **27 s**, with `BACKUP_DESTINATION=s3://mysql-lab-backups/lab/lab-2026-09-12-10:13:48-full` and `TABLES=10`.
 
-**Recovery-history isolation.** After an in-place restore, the old binlog archive can still contain transactions from the discarded history. Shakeout2 t09: markers were correct (`GOOD_AFTER_RESTORE=1`, `BAD_AFTER_RESTORE=0`) but `TABLES_AFTER_RESTORE=9` — an earlier test's `DROP TABLE` had been replayed. Each PITR scenario now starts a fresh archive prefix before its base backup.
+Under the hood the role execs MySQL, then applies this object:
 
-**GTID capture.** The MySQL batch client escapes embedded newlines unless raw output is requested. Shakeout2 t10 failed with `cannot parse GTID set`. A later targeted run failed with `The specified GTID set cannot be covered` when a fresh archive was asked to cover inherited GTIDs from an older backup. t10 now captures GTIDs with `--raw` and requests the GTID difference for the current recovery history.
+```bash
+kubectl -n mysql exec lab-mysql-0 -c mysql -- mysql -uroot -pmysql -N -e \
+  "SELECT CONCAT('TABLES=', COUNT(*)) FROM information_schema.tables
+     WHERE table_schema='sbtest' AND table_name LIKE 'sbtest%';
+   SELECT CONCAT('GTID_AT_BACKUP=', @@GLOBAL.gtid_executed);"
+```
 
-**Incremental backups.** t03 created an incremental on t01's full base: `FULL_BYTES=708418853`, `INCR_BYTES=15510469`, `INCR_PCT_OF_FULL=2`. That proves creation and relative size. It does not prove that restoring an incremental chain works. That would be its own restore-and-compare scenario. The lab does not run one.
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  name: t01-full
+  namespace: mysql
+spec:
+  clusterName: lab
+  storageName: minio
+  type: full
+```
 
-**Test the test.** An expected failure must fail for the intended reason. t11 originally could pass on a timestamp-format error; it now requires a range/search rejection (`Timestamp is too old`) and compares the dataset before and after. Retention must remember observed destinations and check pruned prefixes in MinIO; leftover MD5 sidecars are reported, not described as full deletion.
+```bash
+kubectl -n mysql get ps-backup t01-full -o jsonpath='{.status.state} {.status.destination}{"\n"}'
+```
+
+The operator creates an `xb-t01-full-…` Job running XtraBackup, which streams the datadir to MinIO. The role then runs `mc du local/mysql-lab-backups/lab` inside a throwaway `minio/mc` pod (see `test_common/tasks/mc.yml`).
+
+By hand: `export KUBECONFIG=$PWD/.kube/config`, `kubectl apply` the YAML above, poll `kubectl -n mysql get ps-backup t01-full` until `Succeeded`, then `kubectl -n mysql run mc-du --restart=Never --image=quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z --command -- sh -c 'mc alias set local http://minio:9000 minio minio12345 >/dev/null; mc du local/mysql-lab-backups/lab'`.
+
+## t02 — Backup taken from the replica, primary untouched
+
+t02 proves `sourcePod` moves XtraBackup's read load and brief locking onto a replica. The role finds a pod with `@@read_only = 1`, applies a full backup named `t02-replica` with `sourcePod` set to that pod, and meanwhile inserts a row on the writable primary. It requires the backup's `status.backupSource` to match the replica, not the primary, and `PRIMARY_WRITABLE=yes`. Validation: **14 s**, `SOURCE_POD=lab-mysql-1`, `ACTUAL_BACKUP_SOURCE=lab-mysql-1.lab-mysql.mysql`.
+
+```bash
+kubectl -n mysql get pods -l app.kubernetes.io/instance=lab,app.kubernetes.io/component=database
+kubectl -n mysql exec lab-mysql-1 -c mysql -- mysql -uroot -pmysql -N -e "SELECT @@read_only"
+```
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  name: t02-replica
+  namespace: mysql
+spec:
+  clusterName: lab
+  storageName: minio
+  type: full
+  sourcePod: lab-mysql-1
+```
+
+While that object exists, the role writes on the primary:
+
+```sql
+CREATE TABLE IF NOT EXISTS sbtest.t02_writes (id INT AUTO_INCREMENT PRIMARY KEY, at DATETIME);
+INSERT INTO sbtest.t02_writes (at) VALUES (UTC_TIMESTAMP());
+SELECT CONCAT('PRIMARY_WRITABLE=', IF(@@read_only=0,'yes','no'));
+```
+
+By hand: pick the read-only pod with `SELECT @@read_only`, `kubectl apply` the YAML with that `sourcePod`, and `kubectl -n mysql exec lab-mysql-0 -c mysql -- mysql …` the insert on the primary before the backup finishes.
+
+## t03 — Incremental backup on a full base
+
+t03 proves `type: incremental` with `incrementalBaseBackupName` captures only pages that changed since `t01-full`. It requires that backup to have succeeded, inserts new rows into `sbtest.t03_delta`, applies `t03-incr`, and compares MinIO sizes with `mc du --json`. The incremental must be strictly smaller than the full and greater than zero. Validation: **19 s**, `FULL_BYTES=708418853`, `INCR_BYTES=15510469`, `INCR_PCT_OF_FULL=2`. That is creation and relative size, not a restore of the incremental chain.
+
+```sql
+CREATE TABLE IF NOT EXISTS sbtest.t03_delta (id INT AUTO_INCREMENT PRIMARY KEY, pad CHAR(120));
+INSERT INTO sbtest.t03_delta (pad)
+  SELECT LEFT(MD5(RAND()), 120) FROM sbtest.sbtest1 LIMIT 50000;
+```
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  name: t03-incr
+  namespace: mysql
+spec:
+  clusterName: lab
+  storageName: minio
+  type: incremental
+  incrementalBaseBackupName: t01-full
+```
+
+```bash
+# after stripping s3://mysql-lab-backups/ from each status.destination
+mc du --json local/mysql-lab-backups/lab/lab-2026-09-12-10:13:48-full
+mc du --json local/mysql-lab-backups/lab/lab-2026-09-12-10:13:48-full.incr/lab-2026-09-12-10:14:30-incr
+```
+
+By hand: confirm `t01-full` is `Succeeded`, run the insert via `kubectl exec`, `kubectl apply` the incremental YAML, then size both prefixes with `mc du --json` in an `mc` pod as in t01.
+
+## t04 — Backup and binlog objects present in MinIO
+
+t04 proves the XtraBackup chunks are real files and that the binlog stream is live. `files/probe.py` does `kubectl get ps-backup t01-full -o json`, lists the destination with `mc ls --json --recursive`, requires nonzero chunks (including XtraBackup metadata) and an `.md5` sidecar, then writes 20,000 rows, runs `FLUSH BINARY LOGS`, and polls the binlog bucket until byte count grows. Validation: **40 s**, `BACKUP_CHUNKS=127`, `BACKUP_BYTES=708418853`, `BINLOG_BYTE_GROWTH=20808764`.
+
+```bash
+kubectl -n mysql get ps-backup t01-full -o json
+kubectl -n mysql run mc-probe --restart=Never --image=quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z --command -- \
+  sh -c 'mc alias set local http://minio:9000 minio minio12345 >/dev/null
+         mc ls --json --recursive local/mysql-lab-backups/lab/lab-2026-09-12-10:13:48-full/'
+kubectl -n mysql exec lab-mysql-0 -c mysql -- mysql -uroot -pmysql -e \
+  "CREATE TABLE IF NOT EXISTS sbtest.t04_stream_probe (id BIGINT AUTO_INCREMENT PRIMARY KEY, pad VARBINARY(2048));
+   INSERT INTO sbtest.t04_stream_probe(pad) SELECT RANDOM_BYTES(1024) FROM sbtest.sbtest1 LIMIT 20000;
+   FLUSH BINARY LOGS;"
+```
+
+By hand: those same `kubectl get`, `mc ls`, and `mysql` statements, then `mc ls --json --recursive local/mysql-lab-binlogs/lab/` before and after the write until the summed sizes increase.
+
+## t05 — Scheduled backup runs unattended
+
+t05 proves the operator's cron produces a backup with nobody creating the object. It snapshots `spec.backup.schedule` on the `PerconaServerMySQL` cluster, lists existing objects labeled `percona.com/backup-type=cron`, patches the cluster to `*/3 * * * *` named `suite-fast`, and waits for a *new* successful backup whose ancestor label names that schedule. It always restores the prior schedule. Validation: **207 s**, `NEW_BACKUP=cron-lab-minio-20260912101829-efvvj`, `NEW_BACKUP_STATE=Succeeded`. `keep` on a schedule entry is how many successful backups of that ancestor the operator retains; t05 leaves `keep` at the cluster default while it waits for one new object.
+
+```yaml
+spec:
+  backup:
+    schedule:
+      - name: suite-fast
+        schedule: "*/3 * * * *"
+        keep: 3
+        storageName: minio
+        type: full
+```
+
+```bash
+kubectl -n mysql patch ps lab --type merge -p '{"spec":{"backup":{"schedule":[{"name":"suite-fast","schedule":"*/3 * * * *","keep":3,"storageName":"minio","type":"full"}]}}}'
+kubectl -n mysql get ps-backup -l percona.com/backup-type=cron
+```
+
+By hand: save the current `kubectl -n mysql get ps lab -o jsonpath='{.spec.backup.schedule}'`, apply the patch, wait until a new `cron-lab-minio-…` object is `Succeeded` and not in your saved name list, then patch the original schedule back.
+
+## t06 — Retention prunes scheduled backups down to keep
+
+t06 proves `keep: 2` prunes the oldest successful backups of that schedule so only two remain, deleting both the backup custom resource *and* its data prefix. It patches the same fast schedule with `keep: 2`, then `files/watch.py` lists `ps-backup` objects, waits until at least three successful backups of that ancestor have been seen and exactly two remain, and checks each pruned destination with `mc ls --json --recursive`. Empty data prefixes pass; leftover `.md5` sidecars are reported separately. Validation: **11 s** (pruning against backups that already existed, not waiting for three fresh ones), `SURVIVING_COUNT=2`, `REMOVED_DATA_PREFIX=s3://mysql-lab-backups/lab/lab-2026-09-12-09:06:38-full/`, `MD5_SIDECARS_REMAINING=["lab-2026-09-12-09:06:38-full.md5"]`.
+
+```yaml
+spec:
+  backup:
+    schedule:
+      - name: suite-fast
+        schedule: "*/3 * * * *"
+        keep: 2
+        storageName: minio
+        type: full
+```
+
+```bash
+kubectl -n mysql get ps-backup -o json
+mc ls --json --recursive local/mysql-lab-backups/lab/
+```
+
+By hand: patch `keep: 2`, watch `kubectl -n mysql get ps-backup` until a previously `Succeeded` name disappears, then `mc ls` that destination prefix and confirm it has no data objects (an adjacent `.md5` may remain). Restore the original schedule.
+
+## t07 — Whole-cluster restore rolls back post-backup writes
+
+t07 proves an in-place restore replaces cluster state rather than merging into it. After `t01-full`, it creates `sbtest.canary_after_backup` on the writable primary, applies a `PerconaServerMySQLRestore` named `t07-restore` with `backupName: t01-full` (this time the restore *does* name the source cluster's backup object, because it is restoring onto that same cluster), waits for `Succeeded`, and requires the canary table to be gone while all ten sysbench tables remain. Validation: **161 s**, `CANARY_BEFORE_RESTORE=1`, `CANARY_AFTER_RESTORE=0`, `RESTORED_TABLES=10`. The cluster is down for the restore.
+
+```sql
+CREATE TABLE IF NOT EXISTS sbtest.canary_after_backup (id INT PRIMARY KEY, note VARCHAR(64));
+INSERT INTO sbtest.canary_after_backup VALUES (1,'written after the backup')
+  ON DUPLICATE KEY UPDATE note=VALUES(note);
+```
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: t07-restore
+  namespace: mysql
+spec:
+  clusterName: lab
+  backupName: t01-full
+```
+
+```sql
+SELECT COUNT(*) FROM information_schema.tables
+  WHERE table_schema='sbtest' AND table_name='canary_after_backup';  -- must be 0
+```
+
+By hand: `kubectl -n mysql exec` the canary insert, `kubectl apply` the restore YAML, `kubectl -n mysql get ps-restore t07-restore` until `Succeeded`, wait for pods, then query the canary and `sbtest%` table count.
+
+## t08 — Restore recovers a dropped table
+
+t08 is the ordinary disaster: count `sbtest10`, `DROP TABLE` it, restore `t01-full`, and require the table back with the same row count. Validation: **160 s**, `ROWS_BEFORE_DROP=200000`, `TABLES_AFTER_DROP=9`, `TABLES_AFTER_RESTORE=10`, `ROWS_AFTER_RESTORE=200000`.
+
+```sql
+SELECT COUNT(*) FROM sbtest.sbtest10;
+DROP TABLE sbtest.sbtest10;
+```
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: t08-restore
+  namespace: mysql
+spec:
+  clusterName: lab
+  backupName: t01-full
+```
+
+By hand: the same `kubectl exec` SQL, `kubectl apply` of `t08-restore`, then `SELECT COUNT(*) FROM sbtest.sbtest10` after the cluster is up. This restore is also in-place; it rewinds the whole cluster to `t01-full`.
+
+## t09 — Point-in-time recovery to a timestamp
+
+**PITR** is point-in-time recovery: restore a full backup, then replay binary logs up to a chosen instant so you land *between* two known writes instead of at the backup itself. t09 starts a fresh binlog archive prefix (so an earlier in-place restore cannot mix discarded history into this attempt), takes `t09-base`, inserts a `good` marker, captures `DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s')` with **no `Z` suffix**, inserts a `bad` marker, waits for the binlog server to checkpoint, and restores with `pitr.type: date`. The good marker must survive, the bad marker must not, and all ten sysbench tables must remain. Validation: **355 s**, `PITR_TARGET=2026-09-12T10:25:07`, `GOOD_AFTER_RESTORE=1`, `BAD_AFTER_RESTORE=0`. A `Z` suffix produces `Invalid timestamp format`. Shakeout2 t09 had correct markers but `TABLES_AFTER_RESTORE=9` because an old `DROP TABLE` was replayed from a mixed archive.
+
+```sql
+INSERT INTO sbtest.pitr_markers (label, at) VALUES ('good', UTC_TIMESTAMP(6));
+SELECT DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%s');  -- recovery target, UTC, no Z
+INSERT INTO sbtest.pitr_markers (label, at) VALUES ('bad', UTC_TIMESTAMP(6));
+```
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: t09-restore
+spec:
+  clusterName: lab
+  backupName: t09-base
+  pitr:
+    type: date
+    date: "2026-09-12T10:25:07"
+    backupSource:
+      binlogServer:
+        image: percona/percona-server-mysql-operator:1.2.0-binlog-server-0.4.1
+        serverId: 1011
+        storage:
+          s3:
+            bucket: mysql-lab-binlogs
+            prefix: lab/t09-<stamp>
+```
+
+By hand: patch the cluster binlog prefix to a new value before the base backup, take `t09-base`, write the two markers with a captured timestamp between them, wait two minutes for checkpoint, `kubectl apply` the restore, then `SELECT` the markers. `serverId: 1011` must not collide with the running binlog server (1001).
+
+## t10 — Point-in-time recovery to a GTID
+
+t10 aims PITR at an exact transaction set rather than a clock. After a fresh archive and `t10-base`, it records inherited GTIDs, inserts a `keep-me` marker, computes `GTID_SUBTRACT(@@GLOBAL.gtid_executed, inherited)` as the target, then `DELETE FROM sbtest.sbtest9` with no `WHERE` and a damage marker. Restore uses `pitr.type: gtid`. `sbtest9` must return to its pre-delete count, `keep-me` must survive, the damage marker must not. Validation: **336 s**, `PITR_TARGET=a84e643f-ae94-11f1-8ddd-2ec4c43ab3c3:39-52`, `ROWS_AFTER_RESTORE=200000`. Capture GTIDs with `mysql --raw`: escaped newlines are not a valid GTID set (`cannot parse GTID set`). Asking a fresh archive to cover inherited GTIDs from an older backup produces `The specified GTID set cannot be covered`.
+
+```sql
+SELECT @@GLOBAL.gtid_executed;                 -- inherited, before the base
+INSERT INTO sbtest.gtid_markers (label) VALUES ('keep-me');
+SELECT GTID_SUBTRACT(@@GLOBAL.gtid_executed, '<inherited>');
+DELETE FROM sbtest.sbtest9;
+INSERT INTO sbtest.gtid_markers (label) VALUES ('after-damage');
+```
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: t10-restore
+spec:
+  clusterName: lab
+  backupName: t10-base
+  pitr:
+    type: gtid
+    gtid: "a84e643f-ae94-11f1-8ddd-2ec4c43ab3c3:39-52"
+    backupSource:
+      binlogServer:
+        serverId: 1012
+        storage:
+          s3:
+            bucket: mysql-lab-binlogs
+            prefix: lab/t10-<stamp>
+```
+
+By hand: `kubectl -n mysql exec … mysql --raw -N -e 'SELECT @@GLOBAL.gtid_executed'`, take `t10-base`, compute the subtract, commit the delete, wait for checkpoint, `kubectl apply` the restore with `type: gtid`.
+
+## t11 — An impossible recovery target fails cleanly
+
+t11 proves a request that cannot be satisfied is reported, not silently turned into a plain restore. It snapshots `CHECKSUM TABLE` on all ten sysbench tables, applies a restore of `t09-base` with `pitr.type: date` at `2001-01-01T00:00:00` (valid format, years before any backup), and requires `status.state` in `{Error,Failed}` with `Timestamp is too old` — not `Invalid timestamp format`. It deletes the failed object and requires checksums unchanged. Validation: **24 s**, `RESTORE_STATE=Error`.
+
+```yaml
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: t11-restore
+spec:
+  clusterName: lab
+  backupName: t09-base
+  pitr:
+    type: date
+    date: "2001-01-01T00:00:00"
+    backupSource:
+      binlogServer:
+        serverId: 1013
+        storage:
+          s3:
+            bucket: mysql-lab-binlogs
+            prefix: <current cluster binlog prefix>
+```
+
+```bash
+kubectl -n mysql exec lab-mysql-0 -c mysql -- mysql -uroot -pmysql -N -e "CHECKSUM TABLE sbtest.sbtest1"
+kubectl -n mysql apply -f t11-restore.yaml
+kubectl -n mysql get ps-restore t11-restore -o jsonpath='{.status.state} {.status.stateDescription}{"\n"}'
+```
+
+By hand: checksum first, `kubectl apply` that YAML, wait until the object is `Error` with `Timestamp is too old`, delete it, checksum again. If the operator had restored the backup anyway, checksums or table counts would move.
 
 ## Takeaway checklist
 
