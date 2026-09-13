@@ -27,7 +27,7 @@ This is a **test setup**. Passwords and open networks are for a laptop lab, not 
 How it all works, with diagrams: **[docs/backup-architecture.md](docs/backup-architecture.md)**.
 What each scenario proves and how to run it alone: **[docs/test-catalogue.md](docs/test-catalogue.md)**.
 Measured runs, generated not written: **[docs/results/](docs/results/)**.
-The publishable narrative: **[docs/blog-draft.md](docs/blog-draft.md)**.
+The publishable narrative: **[docs/blog-draft.md](docs/blog-draft.md)**. Published: **[MySQL – test your backup by restoring it as a replica](https://db-ex.eu/blog/mysql-test-your-backup-by-restoring-it-as-a-replica/)**.
 
 Run commands from this directory (`20260911-mysql-replication-backups/`).
 

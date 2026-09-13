@@ -6,4 +6,4 @@ Each file is a standalone Mermaid diagram:
 - `pitr.mmd`: physical restore followed by binlog replay.
 - `restore-as-replica.mmd`: restore a separate cluster, attach replication and compare data.
 
-Render a file with `mmdc -i architecture.mmd -o architecture.svg` or paste its contents into a Mermaid viewer.
+Render a file with `mmdc -i architecture.mmd -o architecture.svg` or paste its contents into a Mermaid viewer. `restore-as-replica.svg` is a rendered copy of `restore-as-replica.mmd` used by the published post.
