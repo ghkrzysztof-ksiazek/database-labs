@@ -1,0 +1,19 @@
+{#- Dashboards are stored as plain JSON under files/dashboards/ and inlined here
+    with lookup('file'), so their {{ legend }} placeholders never pass through Jinja. -#}
+{% set dashboards = [
+  {'name': 'grafana-clickhouse-server', 'file': 'clickhouse-server.json'},
+  {'name': 'grafana-clickhouse-keeper', 'file': 'clickhouse-keeper.json'},
+  {'name': 'grafana-altinity-clickhouse-operator', 'file': 'altinity-clickhouse-operator.json'},
+] %}
+{% for d in dashboards %}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ d.name }}
+  namespace: {{ monitoring_namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  {{ d.file }}: {{ lookup('file', role_path ~ '/files/dashboards/' ~ d.file) | from_json | to_json | to_json }}
+{% endfor %}

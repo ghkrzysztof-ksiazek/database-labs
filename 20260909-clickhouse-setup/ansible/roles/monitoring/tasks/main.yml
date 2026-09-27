@@ -15,7 +15,7 @@
     dest: "{{ repo_root }}/k8s/monitoring/kube-prometheus-values.yaml"
     mode: "0644"
 
-- name: Render ServiceMonitors, alerts, and Grafana dashboard
+- name: Render ServiceMonitors, alerts, and Grafana dashboards
   ansible.builtin.template:
     src: "{{ item }}"
     dest: "{{ repo_root }}/k8s/monitoring/{{ item | regex_replace('\\.j2$', '') }}"
@@ -24,7 +24,7 @@
     - servicemonitors.yaml.j2
     - prometheus-rules.yaml.j2
     - keeper-metrics-service.yaml.j2
-    - grafana-dashboard.yaml.j2
+    - grafana-dashboards.yaml.j2
 
 - name: Add prometheus-community Helm repo
   kubernetes.core.helm_repository:
@@ -54,4 +54,4 @@
     - keeper-metrics-service.yaml
     - servicemonitors.yaml
     - prometheus-rules.yaml
-    - grafana-dashboard.yaml
+    - grafana-dashboards.yaml

@@ -52,7 +52,7 @@ After deploy, from the host:
 | Service | URL |
 | --- | --- |
 | ClickHouse HTTP | http://127.0.0.1:8123 |
-| Grafana | http://127.0.0.1:3000 (admin / `admin`) — dashboard [ClickHouse lab](http://127.0.0.1:3000/d/clickhouse-lab/clickhouse-lab) |
+| Grafana | http://127.0.0.1:3000 (admin / `admin`) — dashboards [ClickHouse server](http://127.0.0.1:3000/d/clickhouse-server), [ClickHouse Keeper](http://127.0.0.1:3000/d/clickhouse-keeper), [Altinity operator](http://127.0.0.1:3000/d/clickhouse-operator) |
 | Prometheus | http://127.0.0.1:9090 |
 | Alertmanager | http://127.0.0.1:9093 |
 

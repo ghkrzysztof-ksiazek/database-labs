@@ -1,6 +1,6 @@
 ---
-# Apply PrometheusRule + Grafana dashboard without a Helm upgrade.
-- name: Refresh alert rules and Grafana dashboard
+# Apply PrometheusRule + Grafana dashboards without a Helm upgrade.
+- name: Refresh alert rules and Grafana dashboards
   hosts: localhost
   gather_facts: false
   vars:
@@ -15,11 +15,13 @@
         dest: "{{ kubeconfig_path | dirname | dirname }}/k8s/monitoring/prometheus-rules.yaml"
         mode: "0644"
 
-    - name: Render Grafana dashboard
+    - name: Render Grafana dashboards
       ansible.builtin.template:
-        src: "{{ playbook_dir }}/../roles/monitoring/templates/grafana-dashboard.yaml.j2"
-        dest: "{{ kubeconfig_path | dirname | dirname }}/k8s/monitoring/grafana-dashboard.yaml"
+        src: "{{ playbook_dir }}/../roles/monitoring/templates/grafana-dashboards.yaml.j2"
+        dest: "{{ kubeconfig_path | dirname | dirname }}/k8s/monitoring/grafana-dashboards.yaml"
         mode: "0644"
+      vars:
+        role_path: "{{ playbook_dir }}/../roles/monitoring"
 
     - name: Apply manifests
       kubernetes.core.k8s:
@@ -28,4 +30,4 @@
         src: "{{ kubeconfig_path | dirname | dirname }}/k8s/monitoring/{{ item }}"
       loop:
         - prometheus-rules.yaml
-        - grafana-dashboard.yaml
+        - grafana-dashboards.yaml

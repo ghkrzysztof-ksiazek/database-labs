@@ -37,7 +37,7 @@ Give Docker about 8 GB RAM.
 | Pickup years in the sample | **2015 only**, avg fare **13.20** |
 | Prometheus `up{job="clickhouse-http"}` | **1** on both replicas |
 | Prometheus `up{job="keeper-metrics"}` | **1** on three Keepers |
-| Grafana dashboard | [ClickHouse lab](http://127.0.0.1:3000/d/clickhouse-lab/clickhouse-lab) (`admin` / `admin`) |
+| Grafana dashboards | [ClickHouse server](http://127.0.0.1:3000/d/clickhouse-server), [ClickHouse Keeper](http://127.0.0.1:3000/d/clickhouse-keeper), [Altinity operator](http://127.0.0.1:3000/d/clickhouse-operator) (`admin` / `admin`) |
 | Alertmanager | Ready; accepts `ClickHouseLabTestAlert` |
 
 Lab HTTP: `http://127.0.0.1:8123` user `default` password `clickhouse`.
