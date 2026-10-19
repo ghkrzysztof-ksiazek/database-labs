@@ -1,0 +1,134 @@
+name: mysql-async-ha
+
+networks:
+  lab:
+    name: mysql-ha
+
+volumes:
+  mysql1:
+  mysql2:
+  mysql3:
+  proxysql:
+  orchestrator:
+
+services:
+  mysql-1:
+    image: mysql:8.4.11
+    container_name: mysql-1
+    hostname: mysql-1
+    networks: [lab]
+    ports:
+      - "13316:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_ROOT_HOST: "%"
+    volumes:
+      - mysql1:/var/lib/mysql
+      - ./mysql/mysql-1.cnf:/etc/mysql/conf.d/lab.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "--protocol=socket", "-uroot", "-pmysql", "ping", "--silent"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 25s
+
+  mysql-2:
+    image: mysql:8.4.11
+    container_name: mysql-2
+    hostname: mysql-2
+    networks: [lab]
+    ports:
+      - "13317:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_ROOT_HOST: "%"
+    volumes:
+      - mysql2:/var/lib/mysql
+      - ./mysql/mysql-2.cnf:/etc/mysql/conf.d/lab.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "--protocol=socket", "-uroot", "-pmysql", "ping", "--silent"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 25s
+
+  mysql-3:
+    image: mysql:8.4.11
+    container_name: mysql-3
+    hostname: mysql-3
+    networks: [lab]
+    ports:
+      - "13318:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_ROOT_HOST: "%"
+    volumes:
+      - mysql3:/var/lib/mysql
+      - ./mysql/mysql-3.cnf:/etc/mysql/conf.d/lab.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "--protocol=socket", "-uroot", "-pmysql", "ping", "--silent"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 25s
+
+  proxysql:
+    image: proxysql/proxysql:2.7.3
+    container_name: proxysql
+    hostname: proxysql
+    networks: [lab]
+    ports:
+      - "16032:6032"
+      - "16033:6033"
+      - "16080:6080"
+    # -c is required on the first start. After proxysql.db exists, ProxySQL
+    # keeps the saved admin database and does not wipe it from this file.
+    command: ["proxysql", "-f", "--idle-threads", "-c", "/etc/proxysql.cnf", "-D", "/var/lib/proxysql"]
+    volumes:
+      - ./proxysql/proxysql.cnf:/etc/proxysql.cnf:ro
+      - proxysql:/var/lib/proxysql
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+    image: mysql-async-ha-orchestrator:3.2.6-24
+    container_name: orchestrator
+    hostname: orchestrator
+    user: "0:0"
+    networks: [lab]
+    ports:
+      - "13000:3000"
+    volumes:
+      - ./orchestrator/orchestrator.conf.json:/etc/orchestrator/orchestrator.conf.json:ro
+      - orchestrator:/var/lib/orchestrator
+
+  sysbench:
+    build:
+      context: ./sysbench
+    image: mysql-async-ha-sysbench:1
+    container_name: sysbench
+    hostname: sysbench
+    networks: [lab]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        stdbuf -oL -eL sysbench /usr/share/sysbench/oltp_read_write.lua \
+          --db-driver=mysql \
+          --mysql-host=proxysql \
+          --mysql-port=6033 \
+          --mysql-user=sbuser \
+          --mysql-password=sbpass \
+          --mysql-db=sbtest \
+          --tables=4 \
+          --table-size=10000 \
+          --threads=4 \
+          --time=0 \
+          --report-interval=1 \
+          --mysql-ignore-errors=all \
+          --db-ps-mode=disable \
+          run 2>&1 | while IFS= read -r line; do
+            printf '%s %s\n' "$$(date +%H:%M:%S)" "$$line"
+          done
+    depends_on:
+      proxysql:
+        condition: service_started

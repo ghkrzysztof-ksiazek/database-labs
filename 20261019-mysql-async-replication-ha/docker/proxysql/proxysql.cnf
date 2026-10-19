@@ -1,0 +1,37 @@
+datadir="/var/lib/proxysql"
+
+admin_variables=
+{
+    admin_credentials="admin:admin"
+    # Web UI on 6080 is HTTPS with HTTP digest. The realm is
+    # "Access to ProxySQL status page". This is not the admin user.
+    stats_credentials="stats:stats"
+    mysql_ifaces="0.0.0.0:6032"
+    refresh_interval=2000
+    web_enabled=true
+    web_port=6080
+}
+
+mysql_variables=
+{
+    interfaces="0.0.0.0:6033"
+    server_version="8.4.11"
+    threads=4
+    max_connections=2000
+    monitor_username="monitor"
+    monitor_password="monitor"
+    monitor_connect_interval=2000
+    monitor_ping_interval=1000
+    monitor_read_only_interval=1000
+    monitor_read_only_timeout=800
+    monitor_writer_is_also_reader=false
+    ping_interval_server_msec=1000
+    ping_timeout_server=500
+    shun_on_failures=2
+    shun_recovery_time_sec=10
+    connect_timeout_server=1000
+    connect_timeout_server_max=2000
+    connect_retries_on_failure=1
+    commands_stats=true
+    sessions_sort=true
+}

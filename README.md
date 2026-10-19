@@ -2,11 +2,12 @@
 
 Reproducible database lab environments that run on a single laptop.
 
-Each lab builds a real cluster inside [kind](https://kind.sigs.k8s.io/) (Kubernetes
-nodes as Docker containers), installs it with Ansible, loads a realistic dataset,
-and wires up Prometheus and Grafana. Every one can be created and destroyed with a
-single command, which is the point: these exist so you can break things on purpose
-and rebuild in minutes.
+Most labs build a real cluster inside [kind](https://kind.sigs.k8s.io/) (Kubernetes
+nodes as Docker containers), install it with Ansible, load a realistic dataset,
+and wire up Prometheus and Grafana. The 20261019 lab is Docker Compose on the
+same host: MySQL, ProxySQL, and Orchestrator, without Kubernetes. Every lab can
+be created and destroyed with a single command, which is the point: these exist
+so you can break things on purpose and rebuild in minutes.
 
 Each experiment lives in its own dated directory (`YYYYMMDD-name`).
 
@@ -15,6 +16,7 @@ Each experiment lives in its own dated directory (`YYYYMMDD-name`).
 | [20260909-clickhouse-setup](20260909-clickhouse-setup/) | Replicated ClickHouse cluster (1 shard × 2 replicas) with a 3-node Keeper ensemble, the Altinity operator, NYC taxi sample data, and Prometheus alerts routed to Slack | [ClickHouse – a replicated cluster on your laptop with kind and Ansible](https://db-ex.eu/blog/clickhouse-a-replicated-cluster-on-your-laptop-with-kind-and-ansible/) |
 | [20260910-mysql-replication-setup](20260910-mysql-replication-setup/) | MySQL source–replica cluster on the Percona ps-operator: async GTID replication, Orchestrator failover, XtraBackup to in-cluster MinIO, canary-verified restore, and scale-out | [MySQL – a replication lab with failover, backups, and scale-out on Kubernetes](https://db-ex.eu/blog/mysql-replication-lab-failover-backups-and-scale-out-on-kubernetes/) |
 | [20260911-mysql-replication-backups](20260911-mysql-replication-backups/) | MySQL backup verification lab: XtraBackup full/incremental/replica-sourced backups to MinIO, scheduled backups and retention, in-place restore, point-in-time recovery to a timestamp and to a GTID, and a restore into a separate cluster that attaches as a replica and catches up | [MySQL – test your backup by restoring it as a replica](https://db-ex.eu/blog/mysql-test-your-backup-by-restoring-it-as-a-replica/) |
+| [20261019-mysql-async-replication-ha](20261019-mysql-async-replication-ha/) | MySQL 8.4 async GTID replication, one source and two replicas, ProxySQL in front, Orchestrator failover into ProxySQL hostgroups, sysbench oltp_read_write | [High availability for MySQL asynchronous replication](20261019-mysql-async-replication-ha/README.md) |
 
 ## Running a lab
 
