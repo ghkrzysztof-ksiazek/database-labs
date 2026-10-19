@@ -62,12 +62,12 @@ Ports on your machine. They sit above the other labs in this repository so two l
 | What | Address on your machine | Login |
 | --- | --- | --- |
 | Application MySQL (ProxySQL) | `127.0.0.1:16033` | `sbuser` / `sbpass` |
-| ProxySQL admin | `127.0.0.1:16032` | `admin` / `admin` |
+| ProxySQL admin | `127.0.0.1:16032` | `radmin` / `radmin` |
 | ProxySQL web page | `https://127.0.0.1:16080/` | `stats` / `stats` |
 | Orchestrator web page | `http://127.0.0.1:13000/` | no login |
 | mysql-1, mysql-2, mysql-3 | `127.0.0.1:13316`, `:13317`, `:13318` | `root` / `mysql` |
 
-Open the ProxySQL page with `https`. Plain `http://` on port 6080 returns an empty reply. The browser will ask for a username and password (HTTP digest, realm `Access to ProxySQL status page`). That user is `stats` / `stats`. `admin` / `admin` is only for the admin port 16032.
+Open the ProxySQL page with `https`. Plain `http://` on port 6080 returns an empty reply. The browser will ask for a username and password (HTTP digest, realm `Access to ProxySQL status page`). That user is `stats` / `stats`. `radmin` / `radmin` is only for the admin port 16032. The built-in `admin` / `admin` user also exists, but ProxySQL accepts it only from inside the container (`docker exec proxysql mysql -h127.0.0.1 -P6032 -uadmin -padmin`); from your machine it fails with `ERROR 1040 ... can only connect locally`.
 
 Other accounts, all with the password equal to the username: `repl` (replication), `orchestrator` (the failover tool), `monitor` (ProxySQL's health checks). They are created in the manual.
 
@@ -152,7 +152,7 @@ Orchestrator logs into every MySQL server, draws the topology, and notices when 
 3. Points the surviving replica at the new source, using GTIDs.
 4. Runs the hook `proxysql-failover-hook.sh`.
 
-Orchestrator 3.2.6 has no built-in "edit ProxySQL hostgroups" feature. The hook is the supported way to extend it (`PostMasterFailoverProcesses` in the config). The hook writes to ProxySQL's admin port: it tries to park the dead source in hostgroup 30, and it inserts the new source into hostgroup 10. The measured failover section shows what ProxySQL's runtime table actually contained a few seconds later.
+Orchestrator 3.2.6 has no built-in "edit ProxySQL hostgroups" feature. The hook is the supported way to extend it (`PostMasterFailoverProcesses` in the config). The hook writes to ProxySQL's admin port as `radmin`: it tries to park the dead source in hostgroup 30, and it inserts the new source into hostgroup 10. The measured failover section shows what ProxySQL's runtime table actually contained a few seconds later.
 
 The image is Percona's build of Orchestrator 3.2.6, not the older upstream build. The upstream build still emits the MySQL commands that 8.4 removed, so it cannot discover these servers.
 
@@ -287,7 +287,7 @@ ProxySQL after the hook. Look at hostgroup 10: mysql-2 is `ONLINE` (the new writ
 
 ![ProxySQL after failover. mysql-2 is the online writer. mysql-1 is shunned.](screenshots/proxysql-servers-after.png)
 
-The hook's log says it parked mysql-1 in hostgroup 30. A few seconds later the runtime table showed mysql-1 shunned in hostgroup 10 instead. `docker kill` deletes the container's DNS name, and ProxySQL drops a server it can no longer resolve when it rebuilds the runtime list. The shun is what kept writes off the dead server. The process was gone, so it could not have accepted them anyway. A network cut that leaves the old source alive and writable is a different failure, and this run did not perform that cut.
+The hook's log says it parked mysql-1 in hostgroup 30 and published mysql-2 into hostgroup 10. Neither happened. In the version of the lab that produced these runs, the hook logged in to ProxySQL as `admin`, and ProxySQL only accepts that user from its own localhost. Both statements were rejected with `ERROR 1040 (42000): User 'admin' can only connect locally`, and the hook wrote its "fenced" and "published" lines without checking. Everything in the table above is ProxySQL's own work: the `read_only` monitor moved mysql-2 into hostgroup 10 and mysql-1 out of the reader role, and the health check shunned mysql-1 because it stopped answering. The shun is what kept writes off the dead server. The process was gone, so it could not have accepted them anyway. The lab now gives the hook its own admin login (`radmin`) and logs `FAILED` when a statement does not apply. A network cut that leaves the old source alive and writable is a different failure, and this run did not perform that cut.
 
 Orchestrator after the promotion. The top node is now mysql-2, read/write. mysql-3 hangs under it. mysql-1 is still drawn, with an invalid last check, because the server never answered again. The page still says "read/write" on that dead node: Orchestrator never got a `read_only` answer after the kill.
 
@@ -481,7 +481,7 @@ These are the failures hit while building and breaking this lab.
 The shape (source, two replicas, a proxy, an external failover manager) is what you would recognise in production. The settings are not.
 
 - **Detection is fast on purpose.** Orchestrator polls every 2 seconds and gives up on a connect after 1 second. ProxySQL pings every second and shuns after two failures. A production Orchestrator poll is often 5–10 seconds, sometimes with several missed checks before a failover. The two-second stall in experiment A is this lab. Your users would wait longer.
-- **Fencing a live old source is unfinished business.** If the source is partitioned and still accepts writes, you can get two writable servers (split brain). The hook tries to mark the old one `OFFLINE_HARD` in hostgroup 30 so ProxySQL will not use it. In this lab `docker kill` removed the process and its DNS name, the runtime row did not stay in hostgroup 30, and the shun plus the dead process were what kept writes away. Do not treat that as proof the fence works against a partition.
+- **Fencing a live old source is unfinished business.** If the source is partitioned and still accepts writes, you can get two writable servers (split brain). The hook tries to mark the old one `OFFLINE_HARD` in hostgroup 30 so ProxySQL will not use it. In the measured runs the hook's admin login was rejected, so the fence never ran; the shun plus the dead process were what kept writes away. The lab's hook now uses a login that works, but no run here has tested the fence against a partition. Do not treat this lab as proof that it holds.
 - **The promoted replica forgets that it was promoted when it restarts.** Orchestrator clears `read_only` in memory. The config file still says `read_only=ON` and `super_read_only=ON`. A container restart of the new source comes back read-only, and writes fail until someone turns those variables off or another failover happens.
 - **Async replication can lose committed transactions.** The client was told the commit succeeded before any replica had the change. Semi-sync replication makes the source wait until at least one replica has *received* the transaction before the client gets that answer. It costs latency on every commit, and it does not save you if the one replica that received it is the server that dies with the source. This lab is async so you can see the failure without that wait. The lost-transaction count was not measured.
 - **The old source is not rebuilt for you.** After failover you have mysql-2 writable and mysql-3 copying from it. mysql-1 stays dead until you clone the new source and point mysql-1 at it. Orchestrator will not prefer mysql-1 if it comes back (`must_not`).

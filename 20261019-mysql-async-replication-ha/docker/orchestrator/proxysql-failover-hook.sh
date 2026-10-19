@@ -22,6 +22,8 @@ SUCCESSOR_HOST="${2:-}"
 FAILURE_TYPE="${3:-unknown}"
 LOG=/var/log/proxysql-failover.log
 MYSQL="mysql --protocol=tcp --skip-ssl --connect-timeout=5 --batch --skip-column-names"
+# Not "admin": ProxySQL only accepts that user from its own localhost.
+ADMIN="$MYSQL -h proxysql -P 6032 -uradmin -pradmin"
 
 log() {
     printf '%s %s\n' "$(date -Is)" "$*" | tee -a "$LOG"
@@ -35,14 +37,18 @@ if [ -z "$FAILED_HOST" ]; then
 fi
 
 # Fence first, even if the successor is not ready yet.
-$MYSQL -h proxysql -P 6032 -uadmin -padmin <<SQL
+if $ADMIN <<SQL 2>>"$LOG"
 DELETE FROM mysql_servers WHERE hostname='${FAILED_HOST}';
 INSERT INTO mysql_servers (hostgroup_id, hostname, port, max_connections, status, comment)
 VALUES (30, '${FAILED_HOST}', 3306, 10, 'OFFLINE_HARD', 'fenced by orchestrator ${FAILURE_TYPE}');
 LOAD MYSQL SERVERS TO RUNTIME;
 SAVE MYSQL SERVERS TO DISK;
 SQL
-log "fenced ${FAILED_HOST} into hostgroup 30"
+then
+    log "fenced ${FAILED_HOST} into hostgroup 30"
+else
+    log "FAILED to fence ${FAILED_HOST}: ProxySQL admin statement failed"
+fi
 
 if [ -z "$SUCCESSOR_HOST" ] || [ "$SUCCESSOR_HOST" = "$FAILED_HOST" ]; then
     log "no distinct successor; read_only monitor remains the reconciler"
@@ -67,12 +73,17 @@ if [ "$ready" -ne 1 ]; then
     exit 0
 fi
 
-$MYSQL -h proxysql -P 6032 -uadmin -padmin <<SQL
+if $ADMIN <<SQL 2>>"$LOG"
 DELETE FROM mysql_servers WHERE hostname='${SUCCESSOR_HOST}';
 INSERT INTO mysql_servers (hostgroup_id, hostname, port, max_connections, status, comment)
 VALUES (10, '${SUCCESSOR_HOST}', 3306, 200, 'ONLINE', 'promoted by orchestrator');
 LOAD MYSQL SERVERS TO RUNTIME;
 SAVE MYSQL SERVERS TO DISK;
 SQL
-log "published ${SUCCESSOR_HOST} into writer hostgroup 10"
+then
+    log "published ${SUCCESSOR_HOST} into writer hostgroup 10"
+else
+    log "FAILED to publish ${SUCCESSOR_HOST}: ProxySQL admin statement failed"
+    exit 1
+fi
 exit 0

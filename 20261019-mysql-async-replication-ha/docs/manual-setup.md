@@ -427,7 +427,7 @@ echo "== sysbench prepare, then a continuous oltp_read_write through ProxySQL ==
 
 echo "== lab is up =="
 echo "ProxySQL MySQL   127.0.0.1:16033   sbuser / sbpass"
-echo "ProxySQL admin   127.0.0.1:16032   admin / admin"
+echo "ProxySQL admin   127.0.0.1:16032   radmin / radmin"
 echo "ProxySQL web     https://127.0.0.1:16080/   stats / stats (digest)"
 echo "Orchestrator     http://127.0.0.1:13000/"
 echo "MySQL source     127.0.0.1:13316   root / mysql"
@@ -447,7 +447,7 @@ The same three lines appear for `sbtest2`, `sbtest3`, and `sbtest4`. Then the lo
 
 ```text
 ProxySQL MySQL   127.0.0.1:16033   sbuser / sbpass
-ProxySQL admin   127.0.0.1:16032   admin / admin
+ProxySQL admin   127.0.0.1:16032   radmin / radmin
 ProxySQL web     https://127.0.0.1:16080/   stats / stats (digest)
 Orchestrator     http://127.0.0.1:13000/
 MySQL source     127.0.0.1:13316   root / mysql

@@ -2,7 +2,10 @@ datadir="/var/lib/proxysql"
 
 admin_variables=
 {
-    admin_credentials="admin:admin"
+    # ProxySQL only lets the user named "admin" log in from localhost
+    # (ERROR 1040 "can only connect locally"). radmin is the admin login for
+    # the published port 16032 and for the Orchestrator hook.
+    admin_credentials="admin:admin;radmin:radmin"
     # Web UI on 6080 is HTTPS with HTTP digest. The realm is
     # "Access to ProxySQL status page". This is not the admin user.
     stats_credentials="stats:stats"
