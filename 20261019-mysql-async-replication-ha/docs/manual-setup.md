@@ -1,43 +1,40 @@
-# Manual setup
+# Build the lab by hand
 
-Build the same topology as `scripts/deploy.sh`, from this directory, with every command written out. The two are the same procedure: `./scripts/lab.sh deploy` is the wrapper, and the blocks below are what it runs.
+This page is the same procedure as `./scripts/lab.sh deploy`, written out so you can see what each step does. Run it if you want to learn the pieces. Run `deploy` if you only want the cluster, then come back to the [experiments](../README.md#experiment-a-the-source-dies).
 
-Run the `bash` blocks in order, in one shell, with the working directory set to `20261019-mysql-async-replication-ha`. A block defines `ROOT`, `COMPOSE`, and the helper functions used by the later blocks.
+Read [Ideas you need first](../README.md#ideas-you-need-first) before you start. The words source, replica, GTID, hostgroup, and hook are explained there in a few paragraphs each.
 
-This was executed verbatim on a clean Docker state (project volumes removed) on 2026-10-19.
+Run the `bash` blocks in order, in **one shell**, from the directory `20261019-mysql-async-replication-ha`. The first block defines helpers (`wait_mysql`, `mysql_exec`) that the later blocks use. A later block pasted into a new shell will fail with `COMPOSE: command not found`.
 
-## What you need on the host
+The expected output below is from a clean run on 2026-10-19 (empty volumes). Server UUIDs are random. Yours will differ. The shape of each result is what you are checking.
 
-- Docker Engine and the `docker compose` plugin
-- `curl` and `python3` (the Orchestrator discovery check parses JSON)
-- `sudo` only if `iptables-legacy` exists and its FORWARD policy is DROP
+If a step does not match, jump to [When something goes wrong](../README.md#when-something-goes-wrong) before you continue. Later steps assume this one worked.
 
-The lab host used for the write-up had no systemd unit for Docker. Docker was installed from the distro packages (`docker.io` 29.1.3 and `docker-compose-v2`) and `dockerd` was started by hand. That is host bootstrap, not part of the topology:
+## What you need
 
-```text
-sudo apt-get update
-sudo apt-get install -y docker.io docker-compose-v2
-sudo dockerd &
-sudo chmod 666 /var/run/docker.sock
-```
+| | |
+| --- | --- |
+| Docker | Engine plus the `docker compose` plugin. The host that produced this page had Engine 29.1.3 and Compose 2.40.3, on Ubuntu 24.04. |
+| Memory | About 4 GB free. |
+| Also | `curl`, `python3`. `sudo` only for the firewall check. |
+| Ports | 13316–13318, 16032, 16033, 16080, 13000. Free these if something else is bound to them. |
 
-## Configuration files these commands mount
+The config files are already in `docker/`. You mount them; you do not retype them.
 
-The commands do not generate the config files. They are in the repository and they are the configuration.
+- `docker/mysql/mysql-1.cnf` is the source: GTID on, binary log on, `read_only` off. `mysql-2.cnf` and `mysql-3.cnf` match it, with their own `server_id` and `report_host`, and with `read_only` and `super_read_only` on. Replicas must reject writes, including from `root`.
+- `docker/proxysql/proxysql.cnf` turns the web page on (HTTPS, port 6080, user `stats` / `stats`), sets the monitor account, and pings every second.
+- `docker/orchestrator/orchestrator.conf.json` is the failover config. The image ships with a config for the Percona Kubernetes operator (a Raft group, semi-sync replication). This file replaces that config. This lab is one Orchestrator process and asynchronous replication.
+- `docker/docker-compose.yml` names the project `mysql-async-ha` and the network `mysql-ha`. There is no restart policy, so `docker kill` stays down.
 
-`docker/mysql/mysql-1.cnf` is the source. `server_id=1`, `report_host=mysql-1`, GTID and binary logging on, `log_replica_updates=ON`, `relay_log_recovery=ON`, `replica_net_timeout=6`, `mysql_native_password=ON`, `read_only=OFF`, `super_read_only=OFF`. `mysql-2.cnf` and `mysql-3.cnf` are the same with `server_id` 2 and 3, `report_host` `mysql-2` and `mysql-3`, and both `read_only=ON` and `super_read_only=ON`.
+`super_read_only=ON` is only in the replica files. The official MySQL image will not initialise a brand-new data directory if that setting is already on. The replicas never initialise: they receive a copy of the source's files.
 
-`super_read_only` is only in the replica files. The official image entrypoint refuses to initialise a datadir when `super_read_only=ON` is already set, and the replicas never run that initialisation: they receive a copy of the source datadir.
+## 1. Make sure containers can talk, then pull the images
 
-`docker/proxysql/proxysql.cnf` sets `admin_credentials="admin:admin"`, `stats_credentials="stats:stats"`, `web_enabled=true`, `web_port=6080`, monitor user `monitor` / `monitor`, `mysql-monitor_writer_is_also_reader=false`, `shun_on_failures=2`, `shun_recovery_time_sec=10`, ping interval 1000 ms, `server_version="8.4.11"`. The first start must pass `-c /etc/proxysql.cnf`. After `proxysql.db` exists, ProxySQL keeps the on-disk admin database.
+**What this does.** Pulls MySQL 8.4.11, ProxySQL 2.7.3, Percona Orchestrator 3.2.6, and a small Alpine image used as a copy tool. Builds the Orchestrator image (it adds a MySQL client for the hook) and the sysbench image. Deletes any previous lab volumes so you start from empty disks.
 
-`docker/orchestrator/orchestrator.conf.json` is the Orchestrator config mounted over the image default. The image default is a Percona-operator Raft / semi-sync layout and is not used. The container is built from `docker/orchestrator/Dockerfile` (`percona/percona-orchestrator:3.2.6-24` plus the MariaDB client and `proxysql-failover-hook.sh`) and runs as uid 0 because the sqlite volume and the hook log are root-owned. The upstream image user is 1001.
+**Why.** A half-initialised data directory from a previous attempt is a confusing GTID history. Empty volumes keep this page repeatable.
 
-`docker/docker-compose.yml` names the project `mysql-async-ha` and the network `mysql-ha`. Volume names below (`mysql-async-ha_mysql1` and so on) come from that project name. There is no restart policy: `docker kill` stays down.
-
-## 1. Firewall check, images, empty volumes
-
-Docker 29 on a host without systemd can program nftables and leave `iptables-legacy` FORWARD policy DROP. Packets between containers on the `mysql-ha` bridge are then dropped, and a replica sits in `Connecting` with error 110. A host whose FORWARD policy is already ACCEPT is left alone.
+On some Linux hosts Docker 29 programs one firewall backend and leaves the older one dropping forwarded packets. Replicas then sit in `Connecting` with error 110, which looks like a replication bug. The script checks for that and opens forwarding only when the policy is `DROP`.
 
 ```bash
 set -euo pipefail
@@ -100,11 +97,26 @@ echo "== remove any previous lab volumes =="
 "${COMPOSE[@]}" down -v --remove-orphans
 ```
 
-## 2. Initialise the source and create accounts
+**What you should see.** Each `docker pull` ends with `Status: Image is up to date` or `Downloaded`. The build ends with `orchestrator  Built` and `sysbench  Built`. `down` prints `Removed` for any old containers. The first time, it prints nothing much, because there is nothing to remove.
 
-Start only `mysql-1`. The entrypoint creates the datadir and the root account (`MYSQL_ROOT_PASSWORD=mysql`, `MYSQL_ROOT_HOST=%`). It answers on a socket from a temporary server before that server is shut down, so the wait below looks for `MySQL init process done. Ready for start up.` and then a real `SELECT 1`, not `mysqladmin ping`.
+**How to check.** `docker image ls` includes `mysql`, `proxysql/proxysql`, `percona/percona-orchestrator`, and `alpine`. `docker ps -a --filter name=mysql-1` is empty.
 
-MySQL 8.4 disables `mysql_native_password` unless the server was started with `mysql_native_password=ON`. ProxySQL 2.7.3 and this Orchestrator build authenticate with that plugin, so every lab account is created `IDENTIFIED WITH mysql_native_password`.
+## 2. Start the source and create the accounts
+
+**What this does.** Starts only mysql-1. The image creates the data directory and the `root` account (`password mysql`, allowed from any host). Then it creates four accounts and the empty `sbtest` database.
+
+**Why each account exists.**
+
+| Account | Password | What it is for |
+| --- | --- | --- |
+| `repl` | `repl` | The replicas log in with this to pull changes. Privilege: `REPLICATION SLAVE`. |
+| `orchestrator` | `orchestrator` | Orchestrator logs in with this to inspect replication and, during failover, to move a replica and clear `read_only`. It needs `SUPER`, replication-admin rights, and `SELECT` on `performance_schema` and on `mysql.slave_master_info` (Orchestrator still reads that table under the old name). |
+| `monitor` | `monitor` | ProxySQL's health check. Privilege: `REPLICATION CLIENT`, so it can read `read_only`. It cannot change data. |
+| `sbuser` | `sbpass` | The application. Rights only on `sbtest`. |
+
+MySQL 8.4 turns the old password plugin off unless the server was started with `mysql_native_password=ON` (it is, in the cnf). ProxySQL 2.7.3 and this Orchestrator build log in with that plugin, so every account is created `IDENTIFIED WITH mysql_native_password`.
+
+The wait is deliberately not `mysqladmin ping`. The image answers a ping from a temporary server, shuts that server down, and only then starts the real one. A command in that gap fails with `ERROR 2002`. The function waits for the log line `MySQL init process done. Ready for start up.` and then runs `SELECT 1`.
 
 ```bash
 echo "== start the source and let the image initialise the datadir =="
@@ -133,13 +145,30 @@ GRANT ALL PRIVILEGES ON sbtest.* TO 'sbuser'@'%';
 SQL
 ```
 
-`repl` is the replication applier account. `orchestrator` is the topology user: it must be able to `CHANGE REPLICATION SOURCE`, set `read_only` / `super_read_only`, and read `performance_schema` plus `mysql.slave_master_info` (Orchestrator still queries that table by its historical name). `monitor` is the ProxySQL monitor and only needs `REPLICATION CLIENT`. `sbuser` is the application account, scoped to `sbtest`.
+**What you should see.**
 
-## 3. Clone the datadir onto the two replicas
+```text
+== start the source and let the image initialise the datadir ==
+mysql-1 is accepting connections
+== create accounts on the source ==
+mysql: [Warning] Using a password on the command line interface can be insecure.
+```
 
-Three independent `docker` entrypoints would each run their own bootstrap and each would execute a different GTID set. Orchestrator would then refuse to promote, because the replicas would not be subsets of the source.
+The warning is MySQL complaining that the password is on the command line. The SQL itself is silent when it works. An `ERROR` line here means stop.
 
-`compose create` builds the replica containers so Compose owns the volumes. The source is stopped, and the datadir is copied. `auto.cnf` is removed on the replicas so the next start allocates a new `server_uuid` while `gtid_executed` stays the source's set.
+**How to check.** This asks MySQL who exists. The four accounts you just created use `mysql_native_password`. `root` stays on `caching_sha2_password`, which is the image default, and that is fine: you talk to `root` with the `mysql` client inside the container, not through ProxySQL. The `mysql.infoschema`, `mysql.session`, and `mysql.sys` rows are MySQL's own internal accounts.
+
+```bash
+docker exec mysql-1 mysql --protocol=socket -uroot -pmysql -e "SELECT User, Host, plugin FROM mysql.user ORDER BY User"
+```
+
+## 3. Copy the source's data onto the two replicas
+
+**What this does.** Creates the replica containers so Compose owns their volumes, stops mysql-1, and copies its data directory onto both replica volumes. Deletes `auto.cnf` on the copies.
+
+**Why.** If you start mysql-2 and mysql-3 empty, each one bootstraps its own GTID history. They would not be copies of mysql-1, and Orchestrator would refuse to promote them later. Copying the files keeps the GTID set identical. Deleting `auto.cnf` makes each replica invent a new server UUID on the next start, while the copied GTID history stays. `server_id` (1, 2, and 3) stays in each config file and is not inside this copy. Two servers must not share a server UUID.
+
+`server_id` and `report_host` live in the config file, which is different per container, so the copy does not make mysql-2 think its name is mysql-1.
 
 ```bash
 echo "== create the replica volumes, then stop the source and clone its datadir =="
@@ -157,9 +186,17 @@ docker run --rm \
     sh -c 'rm -rf /to/* /to/.[!.]* 2>/dev/null || true; cp -a /from/. /to/ && rm -f /to/auto.cnf'
 ```
 
-## 4. Start all three servers and attach replication
+**What you should see.** Compose creates `mysql-2` and `mysql-3` and stops mysql-1. The two `docker run` copies print nothing when they succeed.
 
-MySQL 8.4 removed `CHANGE MASTER TO` and `SHOW SLAVE STATUS`. The statements are `CHANGE REPLICATION SOURCE TO` and `SHOW REPLICA STATUS`.
+**How to check.** The proof is the next step's UUID lines: one shared GTID set, three different server UUIDs. If you look now, mysql-1 is stopped (`docker ps -a` shows `Exited`) and the other two exist but are not started.
+
+## 4. Start all three and attach replication
+
+**What this does.** Starts mysql-1, mysql-2, and mysql-3. Prints each server's UUID, GTID set, name, and read-only flags. Tells mysql-2 and mysql-3 to copy from mysql-1 using GTIDs (`SOURCE_AUTO_POSITION=1`), and waits until both the receiver and the applier are `ON`.
+
+**Why.** `SOURCE_AUTO_POSITION=1` means "send me every GTID I do not already have". `SOURCE_CONNECT_RETRY=1` makes a disconnected replica try again every second, so a short blip does not leave it idle for the default 60 seconds. The retry count is large so a stopped source does not make the replica give up while you are still experimenting.
+
+MySQL 8.4 removed `CHANGE MASTER TO`. The statement below is the current one.
 
 ```bash
 echo "== start source and both replicas =="
@@ -215,13 +252,35 @@ for replica in mysql-2 mysql-3; do
 done
 ```
 
-The three `gtid_executed` values printed above are the same UUID and the same range. The three `server_uuid` values differ. Both replicas report `read_only=1` and `super_read_only=1`.
+**What you should see.** Three lines, then both replicas applying. From the clean run (your UUIDs will be different; the GTID set on all three lines must be the same, and it is only the bootstrap transactions, `:1-16`, because sysbench has not run yet):
 
-## 5. ProxySQL
+```text
+e77b6306-cb5c-11f1-8842-d21221edcaee  e77b6306-cb5c-11f1-8842-d21221edcaee:1-16  mysql-1  0  0
+ed1d1c8b-cb5c-11f1-84b9-1a9293208783  e77b6306-cb5c-11f1-8842-d21221edcaee:1-16  mysql-2  1  1
+ed1e3cd1-cb5c-11f1-b55e-4af5e88734d7  e77b6306-cb5c-11f1-8842-d21221edcaee:1-16  mysql-3  1  1
+mysql-2 receiver=ON applier=ON
+mysql-3 receiver=ON applier=ON
+```
 
-All three servers are inserted into writer hostgroup 10. The replication-hostgroup row tells the monitor to check `read_only` and move a `read_only=1` server to reader hostgroup 20. `mysql-monitor_writer_is_also_reader` is set false again at runtime so a restarted ProxySQL that ignored the cnf still matches this lab.
+Read the columns as: server UUID, GTID set, `report_host`, `read_only`, `super_read_only`. mysql-1 is writable (`0 0`). Both replicas are read-only (`1 1`). The GTID UUID is mysql-1's UUID on every line. The server UUID on the replica lines is a different value, which is what deleting `auto.cnf` did.
 
-`sbuser` defaults to hostgroup 10 with `transaction_persistent=1`. A transaction that starts on the writer stays on the writer. That is what you want for `oltp_read_write`. It is also why a `^SELECT` query rule does not split reads that run inside `BEGIN` (see the experiments).
+**How to check.** On a replica, the human-readable status. `Source_Host` is `mysql-1`, both `Running` columns are `Yes`, `Auto_Position` is `1`.
+
+```bash
+docker exec mysql-2 mysql --protocol=socket -uroot -pmysql -e "SHOW REPLICA STATUS\G" | grep -E "Source_Host|Replica_IO_Running|Replica_SQL_Running|Auto_Position|Seconds_Behind"
+```
+
+A screenshot of this command on a healthy cluster is in the [README](../README.md#a-healthy-cluster). `Connecting` with error 110 is the firewall problem in the troubleshooting table, not a wrong password.
+
+## 5. Put ProxySQL in front
+
+**What this does.** Starts ProxySQL and registers all three servers in hostgroup 10. Adds one replication-hostgroup row: "check `read_only`; writers live in 10, readers live in 20." Creates the application user `sbuser`, aimed at hostgroup 10, with transactions pinned to the server they started on. Loads the config into the running process and saves it.
+
+**Why.** The application will use one address (ProxySQL port 6033). The monitor then moves mysql-2 and mysql-3 to hostgroup 20 because they answer `read_only=1`. mysql-1 stays in hostgroup 10 because it answers `0`. You insert everyone into 10 first so the monitor has something to sort; you do not insert the replicas straight into 20, because a future promotion has to be able to find them from the writer list.
+
+`transaction_persistent=1` is what keeps a transaction on one server. It is also why a later `SELECT` rule will not pull reads out of `oltp_read_write`. That experiment is in the README, and it needs a second client that does not open a transaction.
+
+`LOAD MYSQL SERVERS TO RUNTIME` is the moment the change becomes real. Until that statement, the `INSERT` is only a saved row.
 
 ```bash
 echo "== start ProxySQL and register the three servers =="
@@ -258,13 +317,15 @@ SQL
 echo "== wait until read_only placement has split writer and readers =="
 placed=0
 for _ in $(seq 1 20); do
-    docker exec proxysql mysql --protocol=tcp -h127.0.0.1 -P6032 -uadmin -padmin -e \
-        "SELECT hostgroup_id, hostname, status FROM runtime_mysql_servers ORDER BY hostgroup_id, hostname"
     writer="$(docker exec proxysql mysql --protocol=tcp -N -h127.0.0.1 -P6032 -uadmin -padmin -e \
         "SELECT hostname FROM runtime_mysql_servers WHERE hostgroup_id=10 AND status='ONLINE'")"
     readers="$(docker exec proxysql mysql --protocol=tcp -N -h127.0.0.1 -P6032 -uadmin -padmin -e \
         "SELECT hostname FROM runtime_mysql_servers WHERE hostgroup_id=20 AND status='ONLINE' ORDER BY hostname")"
+    # Print the table after the check, so the lines you read are the lines that were judged.
+    docker exec proxysql mysql --protocol=tcp -h127.0.0.1 -P6032 -uadmin -padmin -e \
+        "SELECT hostgroup_id, hostname, status FROM runtime_mysql_servers ORDER BY hostgroup_id, hostname"
     if [ "$writer" = "mysql-1" ] && [ "$readers" = $'mysql-2\nmysql-3' ]; then
+        echo "ProxySQL placement ok"
         placed=1
         break
     fi
@@ -276,17 +337,29 @@ if [ "$placed" -ne 1 ]; then
 fi
 ```
 
-ProxySQL 2.7.3's `mysql_replication_hostgroups` has `writer_hostgroup`, `reader_hostgroup`, `check_type`, and `comment`. There is no `writer_is_also_reader` column on that table. The column exists on `mysql_group_replication_hostgroups` and `mysql_galera_hostgroups`. The global `mysql-monitor_writer_is_also_reader` is what async replication consults, and only on a `read_only` transition. See experiment C.
+**What you should see.** The admin port comes up (`proxysql admin is up`). The loop prints the runtime table once a second. An early print can still show all three servers in hostgroup 10, which means the monitor has not sorted them yet. The loop stops when the check matches, and then prints `ProxySQL placement ok`. You may see the sorted table more than once; the `ok` line is the one that counts. It looks like this:
 
-Hostgroup 30 is not created here. The failover hook inserts the failed source into hostgroup 30 as `OFFLINE_HARD`. What runtime actually keeps is described with the failover measurement.
+```text
+hostgroup_id  hostname  status
+10            mysql-1   ONLINE
+20            mysql-2   ONLINE
+20            mysql-3   ONLINE
+ProxySQL placement ok
+```
 
-## 6. Orchestrator
+**How to check.** That table is the check. One `ONLINE` server in hostgroup 10, and it is mysql-1. Two `ONLINE` servers in hostgroup 20, mysql-2 and mysql-3. Anything `SHUNNED` at this point means the monitor cannot reach that server: see the troubleshooting table (firewall, or the server is still starting).
 
-Upstream Orchestrator 3.2.6 from openark does not speak MySQL 8.4 (`CHANGE REPLICATION SOURCE`, `performance_schema` replication tables). `percona/percona-orchestrator:3.2.6-24` does. `ReplicationCredentialsQuery` on this build must return five columns: user, password, and three TLS paths. Two columns fail discovery.
+The web page, once you want it: `https://127.0.0.1:16080/`, user `stats`, password `stats`. It draws connection graphs. The table above is the hostgroup status.
 
-`DetectPromotionRuleQuery` makes the successor deterministic: `mysql-2` is `prefer`, `mysql-3` is `neutral`, anything else (including the old source) is `must_not`. `RecoverMasterClusterFilters` is `[".*"]`, which turns automatic master recovery on. `ApplyMySQLPromotionAfterMasterFailover` clears `read_only` / `super_read_only` (because `UseSuperReadOnly` is true) and repoints the surviving replica. `PostMasterFailoverProcesses` runs the hook.
+## 6. Let Orchestrator discover the topology
 
-There is no ProxySQL hostgroup driver in Orchestrator 3.2.6. The hook is the supported extension point.
+**What this does.** Starts Orchestrator, asks it to look at mysql-1, and waits until it has found 3 servers.
+
+**Why.** Orchestrator learns the replicas by asking the source who is connected (`DiscoverByShowSlaveHosts`, which still uses the historical name). Giving it mysql-1 is enough. It logs in as `orchestrator` / `orchestrator`.
+
+The config prefers mysql-2 as the next source, accepts mysql-3, and refuses anyone else. Automatic recovery is on (`RecoverMasterClusterFilters` matches every cluster). After a promotion it runs `proxysql-failover-hook.sh`, which edits ProxySQL. There is no ProxySQL button inside Orchestrator 3.2.6; the hook is how you extend it.
+
+The poll is every 2 seconds so a crash shows up quickly. That is a lab choice. Production is usually slower, and the failover time in the README belongs to these settings.
 
 ```bash
 echo "== start Orchestrator and discover mysql-1 =="
@@ -317,17 +390,23 @@ if [ "$discovered" -ne 1 ]; then
 fi
 ```
 
-`/api/instances` returns 404 on this build. `/api/clusters-info` returns `CountInstances`. The topology UI is `/web/cluster/alias/mysql-1` while `mysql-1` is the primary (`DetectClusterAliasQuery` is `SELECT @@report_host`). After failover the alias follows the new primary.
+**What you should see.** `orchestrator http is up`, a long JSON document from the discover call (`"Code":"OK"`), then a count that climbs:
 
-Poll interval is 2 seconds and the MySQL connect timeout is 1 second. Those are lab values so a crash shows up in one poll. Production defaults are slower; the failover time in the write-up is this configuration, not a generic Orchestrator number.
+```text
+orchestrator instances=1
+orchestrator instances=1
+orchestrator instances=3
+```
 
-## 7. sysbench
+`1` is normal for the first few seconds: Orchestrator has seen mysql-1 and has not walked to the replicas yet. It must reach `3` before you continue. The script exits if it does not.
 
-`oltp_read_write` prepare (4 tables, 10 000 rows) goes through ProxySQL as `sbuser`, so it lands on the writer. The long-running container uses `--report-interval=1`, `--mysql-ignore-errors=all`, `--db-ps-mode=disable`, and a timestamp prefix on each line.
+**How to check.** Open `http://127.0.0.1:13000/` and open the cluster `mysql-1`. You should see mysql-1 at the top, read/write, with mysql-2 and mysql-3 under it, read-only. That picture is the first screenshot in the README. `/api/instances` returns 404 on this build; the count above comes from `/api/clusters-info`, which is the working endpoint.
 
-`--db-ps-mode=disable` matters once query rules exist. A prepared statement pins its backend at `COM_STMT_PREPARE`, and ProxySQL does not re-evaluate `match_digest` for later executes. The text protocol lets a `^SELECT` rule see the statement.
+## 7. Load data and start the application
 
-`--mysql-ignore-errors=all` keeps sysbench alive across failover and counts the failures in `err/s`. Without it, the first server error ends the run and there is no recovery line to read.
+**What this does.** sysbench creates 4 tables of 10 000 rows in `sbtest`, through ProxySQL, as `sbuser`. Those writes land on mysql-1 and replicate. Then a container starts `oltp_read_write` forever, 4 threads, one status line per second, with errors counted rather than fatal.
+
+**Why the flags.** `--mysql-ignore-errors=all` keeps the process alive across a failover so you can see `err/s` rise and fall. `--db-ps-mode=disable` sends the statement text, which is what a ProxySQL query rule matches. The clock prefix on each line is there so you can line the output up with `docker kill`.
 
 ```bash
 echo "== sysbench prepare, then a continuous oltp_read_write through ProxySQL =="
@@ -355,18 +434,62 @@ echo "MySQL source     127.0.0.1:13316   root / mysql"
 echo "MySQL replicas   127.0.0.1:13317 and 127.0.0.1:13318"
 ```
 
-## Check the steady state
+**What you should see.** sysbench prepare names the tables and the row counts:
+
+```text
+sysbench 1.0.20 (using system LuaJIT 2.1.0-beta3)
+Creating table 'sbtest1'...
+Inserting 10000 records into 'sbtest1'
+Creating a secondary index on 'sbtest1'...
+```
+
+The same three lines appear for `sbtest2`, `sbtest3`, and `sbtest4`. Then the long-running container starts, and the script prints the addresses:
+
+```text
+ProxySQL MySQL   127.0.0.1:16033   sbuser / sbpass
+ProxySQL admin   127.0.0.1:16032   admin / admin
+ProxySQL web     https://127.0.0.1:16080/   stats / stats (digest)
+Orchestrator     http://127.0.0.1:13000/
+MySQL source     127.0.0.1:13316   root / mysql
+MySQL replicas   127.0.0.1:13317 and 127.0.0.1:13318
+```
+
+**How to check.** `docker logs --tail 5 sysbench` shows a line every second. A healthy line has `thds: 4`, `err/s: 0.00`, `reconn/s: 0.00`, and `tps` in the hundreds. The column-by-column reading is in the README. Your `tps` will not match the write-up's 800; compare a failure to the lines just before it.
+
+The replicas now have more GTIDs than `:1-16`. That is sysbench. Both `receiver` and `applier` should still be `ON`, and `Seconds_Behind_Source` should be a small number (0 or 1) once the burst of inserts has been applied.
+
+## 8. Confirm the whole starting state
+
+**What this does.** Runs `scripts/verify.sh`.
+
+**Why.** It checks the five facts the experiments assume: mysql-1 answers, both replicas are `super_read_only` and applying, ProxySQL's only online writer is mysql-1, Orchestrator knows 3 servers, and sysbench is running.
 
 ```bash
 ./scripts/lab.sh verify
 ```
 
-`verify` checks that `mysql-1` answers, both replicas are `super_read_only=1` with receiver and applier `ON`, ProxySQL's only ONLINE writer-hostgroup server is `mysql-1`, Orchestrator reports 3 instances, and the sysbench container is running. It describes the initial topology. After a failover it fails on purpose, because the writer is no longer `mysql-1`.
+**What you should see.**
 
-## Tear it down
+```text
+verify: steady state ok
+```
+
+**How to check.** That line is the check. Any `verify:` message on stderr names the fact that failed. After you kill mysql-1 in experiment A, this command fails on purpose, because the writer is no longer mysql-1. Run it now, before you break anything.
+
+You are ready for the experiments in the [README](../README.md#experiment-a-the-source-dies).
+
+## Clean up
+
+**What this does.** Deletes the lab containers, the data volumes, and the `mysql-ha` network.
+
+**Why.** The volumes hold the MySQL files. Leaving them means the next run clones stale data. `-v` removes them.
 
 ```bash
 ./scripts/lab.sh teardown
 ```
 
-That is `docker compose -f docker/docker-compose.yml down -v --remove-orphans`.
+**What you should see.** `Stopped`, `Removed`, and at the end `lab removed`.
+
+**How to check.** `docker ps -a --filter network=mysql-ha` is empty, and `docker volume ls | grep mysql-async-ha` prints nothing.
+
+This does not put your firewall back. If step 1 printed that it changed `iptables-legacy` FORWARD to `ACCEPT`, that change is still on the host. A sysbench container you started yourself for experiment C is not part of Compose; remove it with `docker rm -f` and the name you gave it.

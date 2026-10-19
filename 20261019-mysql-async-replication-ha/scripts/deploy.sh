@@ -187,13 +187,15 @@ SQL
 echo "== wait until read_only placement has split writer and readers =="
 placed=0
 for _ in $(seq 1 20); do
-    docker exec proxysql mysql --protocol=tcp -h127.0.0.1 -P6032 -uadmin -padmin -e \
-        "SELECT hostgroup_id, hostname, status FROM runtime_mysql_servers ORDER BY hostgroup_id, hostname"
     writer="$(docker exec proxysql mysql --protocol=tcp -N -h127.0.0.1 -P6032 -uadmin -padmin -e \
         "SELECT hostname FROM runtime_mysql_servers WHERE hostgroup_id=10 AND status='ONLINE'")"
     readers="$(docker exec proxysql mysql --protocol=tcp -N -h127.0.0.1 -P6032 -uadmin -padmin -e \
         "SELECT hostname FROM runtime_mysql_servers WHERE hostgroup_id=20 AND status='ONLINE' ORDER BY hostname")"
+    # Print the table after the check, so the lines you read are the lines that were judged.
+    docker exec proxysql mysql --protocol=tcp -h127.0.0.1 -P6032 -uadmin -padmin -e \
+        "SELECT hostgroup_id, hostname, status FROM runtime_mysql_servers ORDER BY hostgroup_id, hostname"
     if [ "$writer" = "mysql-1" ] && [ "$readers" = $'mysql-2\nmysql-3' ]; then
+        echo "ProxySQL placement ok"
         placed=1
         break
     fi

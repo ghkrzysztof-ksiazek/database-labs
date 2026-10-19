@@ -78,6 +78,26 @@ class LabLayoutTests(unittest.TestCase):
             self.assertIn("read_only=ON", text)
             self.assertIn("super_read_only=ON", text)
 
+    def test_writeup_teaches_the_ideas_before_the_experiments(self) -> None:
+        readme = (ROOT / "README.md").read_text()
+        manual = (ROOT / "docs" / "manual-setup.md").read_text()
+        for heading in (
+            "What you will build",
+            "What you will learn",
+            "Before you start",
+            "Ideas you need first",
+            "When something goes wrong",
+            "What is different in production",
+            "Glossary",
+            "Clean up",
+        ):
+            self.assertIn(heading, readme, heading)
+        self.assertIn("```mermaid", readme)
+        self.assertIn("What you should see", manual)
+        self.assertIn("How to check", manual)
+        # Concepts appear before the first experiment's timings.
+        self.assertLess(readme.index("Ideas you need first"), readme.index("Experiment A"))
+
     def test_screenshots_referenced_by_the_readme_exist(self) -> None:
         readme = (ROOT / "README.md").read_text()
         refs = re.findall(r"\((screenshots/[^)]+)\)", readme)
