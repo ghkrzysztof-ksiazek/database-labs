@@ -37,7 +37,12 @@ if [ -z "$FAILED_HOST" ]; then
 fi
 
 # Fence first, even if the successor is not ready yet.
+# SAVE ... FROM RUNTIME first: the read_only monitor only changes the runtime,
+# so the admin table still holds the deploy-time rows (every server in
+# hostgroup 10). Loading those back would make the replicas writer targets
+# until the next read_only check, and writes would fail on super_read_only.
 if $ADMIN <<SQL 2>>"$LOG"
+SAVE MYSQL SERVERS FROM RUNTIME;
 DELETE FROM mysql_servers WHERE hostname='${FAILED_HOST}';
 INSERT INTO mysql_servers (hostgroup_id, hostname, port, max_connections, status, comment)
 VALUES (30, '${FAILED_HOST}', 3306, 10, 'OFFLINE_HARD', 'fenced by orchestrator ${FAILURE_TYPE}');
@@ -73,6 +78,8 @@ if [ "$ready" -ne 1 ]; then
     exit 0
 fi
 
+# No second SAVE FROM RUNTIME here: runtime_mysql_servers does not list
+# OFFLINE_HARD rows, so it would drop the hostgroup 30 fence row.
 if $ADMIN <<SQL 2>>"$LOG"
 DELETE FROM mysql_servers WHERE hostname='${SUCCESSOR_HOST}';
 INSERT INTO mysql_servers (hostgroup_id, hostname, port, max_connections, status, comment)

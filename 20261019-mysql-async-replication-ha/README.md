@@ -4,7 +4,7 @@
 
 This is a hands-on lab for people who have used MySQL and have not yet run a failover. Highly available, in this lab, means the application keeps a single address and writes resume after the server that was taking them dies. You will build that on your laptop, break it on purpose, and see what the application experiences.
 
-The numbers, command output, and screenshots are from a real run on 2026-10-19. Nothing here is mocked.
+The numbers, command output, and screenshots are from real runs on 2026-10-19. Nothing here is mocked. The logs and sysbench lines are from the first run. The screenshots were retaken in a second run, with each query shown above its output, so server UUIDs, GTID ranges, counters, and clock times in the images differ from the logs. Experiment A, and the ProxySQL table at the end of experiment C, come from a third run, after a bug in the failover hook was fixed. Its logs and screenshots match each other.
 
 ## What you will build
 
@@ -152,7 +152,7 @@ Orchestrator logs into every MySQL server, draws the topology, and notices when 
 3. Points the surviving replica at the new source, using GTIDs.
 4. Runs the hook `proxysql-failover-hook.sh`.
 
-Orchestrator 3.2.6 has no built-in "edit ProxySQL hostgroups" feature. The hook is the supported way to extend it (`PostMasterFailoverProcesses` in the config). The hook writes to ProxySQL's admin port as `radmin`: it tries to park the dead source in hostgroup 30, and it inserts the new source into hostgroup 10. The measured failover section shows what ProxySQL's runtime table actually contained a few seconds later.
+Orchestrator 3.2.6 has no built-in "edit ProxySQL hostgroups" feature. The hook is the supported way to extend it (`PostMasterFailoverProcesses` in the config). The hook writes to ProxySQL's admin port as `radmin`: it parks the dead source in hostgroup 30, and it inserts the new source into hostgroup 10. Before either edit it runs `SAVE MYSQL SERVERS FROM RUNTIME`, so it edits what ProxySQL is actually doing rather than the rows `deploy` wrote at startup. Experiment A shows why that line is there.
 
 The image is Percona's build of Orchestrator 3.2.6, not the older upstream build. The upstream build still emits the MySQL commands that 8.4 removed, so it cannot discover these servers.
 
@@ -202,7 +202,7 @@ Two details worth knowing before you read the manual:
 
 Open Orchestrator at `http://127.0.0.1:13000/` and follow the cluster named `mysql-1`.
 
-![Orchestrator before any failure. mysql-1 is the top node and is read/write. mysql-2 and mysql-3 sit under it, read-only, each about 1 second behind, with GTID turned on.](screenshots/orchestrator-topology-before.png)
+![Orchestrator before any failure. mysql-1 is the top node and is read/write. mysql-2 and mysql-3 sit under it, read-only, with no lag, with GTID turned on.](screenshots/orchestrator-topology-before.png)
 
 The cluster list is the same fact in one row: one cluster, three servers, recovery enabled.
 
@@ -238,7 +238,7 @@ While this is healthy, `docker logs -f sysbench` looks like the sample in [How t
 docker kill mysql-1
 ```
 
-There is no restart policy, so the container stays stopped (`Exited (137)`). Watch `docker logs -f sysbench`, Orchestrator at `http://127.0.0.1:13000/`, and:
+There is no restart policy, so the container stays stopped (`Exited (137)`). Watch `docker logs -f sysbench`, Orchestrator at [http://127.0.0.1:13000/](http://127.0.0.1:13000/), and:
 
 ```bash
 docker exec proxysql mysql -h127.0.0.1 -P6032 -uadmin -padmin \
@@ -247,55 +247,59 @@ docker logs orchestrator 2>&1 | tail
 docker exec orchestrator tail -n 20 /var/log/proxysql-failover.log
 ```
 
-**What happened at 01:18:57.** Orchestrator's view, one second at a time. `rw` is read/write, `ro` is read-only, `+` means "this replica is attached":
+**What happened at 21:59:17.** Orchestrator's view, one second at a time, from its `/api/all-instances` endpoint. Each entry is a server, then its source, its replication lag, whether Orchestrator's last check of it worked, `rw` (read/write) or `ro` (read-only), and whether both replication threads are running:
 
 ```text
-01:18:57 mysql-1 [0s,ok,rw]  + mysql-2 [1s,ok,ro]  + mysql-3 [1s,ok,ro]
-01:18:58 mysql-1 [unknown,invalid,rw]  - mysql-2 [null,nonreplicating,ro]  - mysql-3 [null,nonreplicating,ro]
-01:18:59 mysql-2 [0s,ok,rw]  + mysql-3 [0s,ok,ro]
+21:59:18 mysql-1[src=-,null,ok,rw,repl=no] mysql-2[src=mysql-1,0s,ok,ro,repl=yes] mysql-3[src=mysql-1,0s,ok,ro,repl=yes]
+21:59:19 mysql-1[src=-,null,invalid,rw,repl=no] mysql-2[src=mysql-1,null,ok,ro,repl=no] mysql-3[src=mysql-1,null,ok,ro,repl=no]
+21:59:20 mysql-1[src=-,null,invalid,rw,repl=no] mysql-2[src=mysql-1,null,ok,ro,repl=no] mysql-3[src=mysql-1,null,ok,ro,repl=no]
+21:59:21 mysql-1[src=-,null,invalid,rw,repl=no] mysql-2[src=-,null,ok,rw,repl=no] mysql-3[src=mysql-2,0s,ok,ro,repl=yes]
 ```
 
-The hook log is the same second as the promotion:
-
-`DeadMaster` is Orchestrator's name for "the source stopped answering".
+The hook log starts the second Orchestrator detects the failure and is done one second later. `DeadMaster` is Orchestrator's name for "the source stopped answering".
 
 ```text
-2026-10-19T01:18:59+00:00 detected DeadMaster cluster=mysql-1:3306 failed=mysql-1:3306
-2026-10-19T01:18:59+00:00 pre-failover DeadMaster cluster=mysql-1:3306 failed=mysql-1:3306
-2026-10-19T01:18:59+00:00 hook start type=DeadMaster failed=mysql-1 successor=mysql-2
-2026-10-19T01:18:59+00:00 fenced mysql-1 into hostgroup 30
-2026-10-19T01:18:59+00:00 successor mysql-2 read_only=0
-2026-10-19T01:18:59+00:00 published mysql-2 into writer hostgroup 10
-2026-10-19T01:18:59+00:00 post-failover DeadMaster failed=mysql-1 successor=mysql-2:3306
+2026-10-19T21:59:19+00:00 detected DeadMaster cluster=mysql-1:3306 failed=mysql-1:3306
+2026-10-19T21:59:19+00:00 pre-failover DeadMaster cluster=mysql-1:3306 failed=mysql-1:3306
+2026-10-19T21:59:20+00:00 hook start type=DeadMaster failed=mysql-1 successor=mysql-2
+2026-10-19T21:59:20+00:00 fenced mysql-1 into hostgroup 30
+2026-10-19T21:59:20+00:00 successor mysql-2 read_only=0
+2026-10-19T21:59:20+00:00 published mysql-2 into writer hostgroup 10
+2026-10-19T21:59:20+00:00 post-failover DeadMaster failed=mysql-1 successor=mysql-2:3306
 ```
 
 sysbench, same clock:
 
 ```text
-01:18:56 [ 779s ] thds: 4 tps: 888.31 qps: 17773.22 (r/w/o: 12436.36/3560.24/1776.62) lat (ms,95%): 6.67 err/s: 0.00 reconn/s: 0.00
-01:18:57 [ 780s ] thds: 4 tps: 430.32 qps: 8597.38 (r/w/o: 6022.47/1714.27/860.64) lat (ms,95%): 9.73 err/s: 0.00 reconn/s: 4.00
-01:18:58 [ 781s ] thds: 4 tps: 0.00   qps: 0.00    (r/w/o: 0.00/0.00/0.00)       lat (ms,95%): 0.00 err/s: 0.00 reconn/s: 0.00
-01:18:59 [ 782s ] thds: 4 tps: 0.00   qps: 0.00    (r/w/o: 0.00/0.00/0.00)       lat (ms,95%): 0.00 err/s: 4.00 reconn/s: 0.00
-01:19:00 [ 783s ] thds: 4 tps: 522.99 qps: 10481.76 (r/w/o: 7337.83/2095.95/1047.98) lat (ms,95%): 4.91 err/s: 0.00 reconn/s: 0.00
-01:19:01 [ 784s ] thds: 4 tps: 760.13 qps: 15241.48 (r/w/o: 10674.73/3044.50/1522.25) lat (ms,95%): 5.09 err/s: 2.00 reconn/s: 0.00
-01:19:02 [ 785s ] thds: 4 tps: 1021.94 qps: 20420.83 (r/w/o: 14289.17/4087.77/2043.88) lat (ms,95%): 5.67 err/s: 0.00 reconn/s: 0.00
+21:59:16 [ 217s ] thds: 4 tps: 968.05 qps: 19378.05 (r/w/o: 13565.74/3876.21/1936.10) lat (ms,95%): 4.49 err/s: 0.00 reconn/s: 0.00
+21:59:17 [ 218s ] thds: 4 tps: 653.84 qps: 13060.89 (r/w/o: 9143.82/2609.38/1307.69) lat (ms,95%): 4.82 err/s: 0.00 reconn/s: 4.00
+21:59:18 [ 219s ] thds: 4 tps: 0.00   qps: 0.00     (r/w/o: 0.00/0.00/0.00)        lat (ms,95%): 0.00 err/s: 0.00 reconn/s: 0.00
+21:59:19 [ 220s ] thds: 4 tps: 0.00   qps: 0.00     (r/w/o: 0.00/0.00/0.00)        lat (ms,95%): 0.00 err/s: 4.03 reconn/s: 0.00
+21:59:20 [ 221s ] thds: 4 tps: 858.55 qps: 17220.06 (r/w/o: 12057.75/3441.21/1721.11) lat (ms,95%): 4.41 err/s: 0.00 reconn/s: 0.00
+21:59:21 [ 222s ] thds: 4 tps: 1069.01 qps: 21368.17 (r/w/o: 14960.12/4270.03/2138.02) lat (ms,95%): 4.65 err/s: 0.00 reconn/s: 0.00
+21:59:22 [ 223s ] thds: 4 tps: 1095.96 qps: 21928.12 (r/w/o: 15349.39/4386.82/2191.91) lat (ms,95%): 4.03 err/s: 0.00 reconn/s: 0.00
 ```
 
-Read it against the column guide above. The kill second (01:18:57) still finished 430 transactions, and all 4 threads reconnected (`reconn/s` 4.00). The next two seconds completed nothing. At 01:18:59 each thread recorded one error (`err/s` 4.00). At 01:19:00 traffic was back (523 tps). At 01:19:01 two late errors arrived (`err/s` 2.00) from threads whose next statement still hit the dead server. At 01:19:02 the rate was above the line from before the kill, and `err/s` was 0.
+Read it against the column guide above. The kill second (21:59:17) still finished 654 transactions, and all 4 threads reconnected (`reconn/s` 4.00). The next two seconds completed nothing. At 21:59:19 each thread recorded one error (`err/s` 4.03). At 21:59:20, the second the hook published mysql-2, traffic was back (859 tps). At 21:59:21 the rate was above the line from before the kill, and `err/s` stayed 0 from there on. That is 4 failed transactions in total, one per connection.
 
-ProxySQL after the hook. Look at hostgroup 10: mysql-2 is `ONLINE` (the new writer) and mysql-1 is `SHUNNED` (ProxySQL will not send it queries). mysql-3 was briefly `SHUNNED` in hostgroup 20 even though replication had already restarted; a later reload put it back to `ONLINE`.
+ProxySQL after the hook. The first query is the runtime, what ProxySQL is routing by: mysql-2 is the `ONLINE` writer, with the hook's comment, and mysql-3 is the reader. mysql-1 is missing, because `runtime_mysql_servers` does not list `OFFLINE_HARD` servers. The second query is the admin table, which does: mysql-1 sits in hostgroup 30, `OFFLINE_HARD`, fenced by the hook. Nothing routes to hostgroup 30, and `OFFLINE_HARD` means ProxySQL drops the connections it still holds to that server.
 
-![ProxySQL after failover. mysql-2 is the online writer. mysql-1 is shunned.](screenshots/proxysql-servers-after.png)
+![ProxySQL after failover. Runtime: mysql-2 is the online writer, mysql-3 the reader. Admin table: mysql-1 is fenced in hostgroup 30 as OFFLINE_HARD.](screenshots/proxysql-servers-after.png)
 
-The hook's log says it parked mysql-1 in hostgroup 30 and published mysql-2 into hostgroup 10. Neither happened. In the version of the lab that produced these runs, the hook logged in to ProxySQL as `admin`, and ProxySQL only accepts that user from its own localhost. Both statements were rejected with `ERROR 1040 (42000): User 'admin' can only connect locally`, and the hook wrote its "fenced" and "published" lines without checking. Everything in the table above is ProxySQL's own work: the `read_only` monitor moved mysql-2 into hostgroup 10 and mysql-1 out of the reader role, and the health check shunned mysql-1 because it stopped answering. The shun is what kept writes off the dead server. The process was gone, so it could not have accepted them anyway. The lab now gives the hook its own admin login (`radmin`) and logs `FAILED` when a statement does not apply. A network cut that leaves the old source alive and writable is a different failure, and this run did not perform that cut.
+**Two hook bugs this run found.** The first two runs used an earlier hook, and their failover still worked, but not because of the hook:
 
-Orchestrator after the promotion. The top node is now mysql-2, read/write. mysql-3 hangs under it. mysql-1 is still drawn, with an invalid last check, because the server never answered again. The page still says "read/write" on that dead node: Orchestrator never got a `read_only` answer after the kill.
+- The old hook logged in to ProxySQL as `admin`. ProxySQL accepts that user only from its own localhost, so every statement was rejected with `ERROR 1040 (42000): User 'admin' can only connect locally`. The hook did not check, and logged "fenced" and "published" anyway. ProxySQL's own `read_only` monitor moved mysql-2 into hostgroup 10, and the health check shunned mysql-1. The lab now has a second admin user, `radmin`, for the hook and for port 16032, and the hook logs `FAILED` when a statement does not apply.
+- With the login fixed, the next run went worse: 112 and then 240 errors per second for two seconds. `deploy` loads all three servers into hostgroup 10 and lets the `read_only` monitor sort them, but the monitor changes only the runtime. The admin table still said "everyone in hostgroup 10". When the hook ran `LOAD MYSQL SERVERS TO RUNTIME`, ProxySQL loaded that stale table, made mysql-3 a writer for about a second, and writes failed on its `super_read_only`. The hook now runs `SAVE MYSQL SERVERS FROM RUNTIME` before it edits anything. The run above is with that fix.
 
-![Orchestrator after failover. mysql-2 is the source. mysql-3 replicates from it. mysql-1's last check is invalid.](screenshots/orchestrator-topology-after.png)
+Any script that edits ProxySQL during an incident has the same trap: read what is running before you write, and check that each write was applied. A network cut that leaves the old source alive and writable is a different failure, and this run did not perform that cut.
 
-![Orchestrator cluster list after failover. The cluster alias is now mysql-2.](screenshots/orchestrator-clusters-after.png)
+Orchestrator after the promotion. The top node is now mysql-2, read/write. mysql-3 hangs under it. The dead mysql-1 is not in this graph. The banner names the `DeadMaster` recovery that promoted mysql-2.
 
-`SHOW REPLICA STATUS` on mysql-2 is empty: it is the source now, with `read_only=0` and `super_read_only=0`. On mysql-3 look at `Source_Host` (mysql-2), both threads `Yes`, `Seconds_Behind_Source` 1, `Auto_Position` 1. The GTID set still contains the old source's transactions (`0167371c-…:1-659315`) plus the new source's (`084bc058-…:1-2912`). Orchestrator moved the replica with GTIDs. It did not rebuild mysql-1.
+![Orchestrator after failover. mysql-2 is the source. mysql-3 replicates from it. The banner records the DeadMaster promotion.](screenshots/orchestrator-topology-after.png)
+
+![Orchestrator cluster list after failover. The cluster alias is now mysql-2, with two instances. The dead mysql-1 is listed on its own, with a warning icon.](screenshots/orchestrator-clusters-after.png)
+
+`SHOW REPLICA STATUS` on mysql-2 is empty: it is the source now, with `read_only=0` and `super_read_only=0`. On mysql-3 look at `Source_Host` (mysql-2), both threads `Yes`, `Seconds_Behind_Source` 1 (it was still catching up on sysbench writes), `Auto_Position` 1. The GTID set still contains the old source's transactions (`c5d38ec0-…:1-189376`) plus the new source's (`cb080e17-…:1-25607`). Orchestrator moved the replica with GTIDs. It did not rebuild mysql-1.
 
 ![Replica status after failover. mysql-3 now copies from mysql-2. mysql-2 has no replica status, because it is the source.](screenshots/mysql-replica-status-after.png)
 
@@ -307,7 +311,7 @@ The ProxySQL connection graph across the same minute. Client connections stay (s
 
 **What this means for your application.** With this lab's timers, a crash of the source is about two seconds of zero throughput and one error per connection, then the application is writing again without anyone changing its host or password. The address it uses is ProxySQL the whole time. Transactions the source committed and the replicas had not yet applied are gone; the killed data directory was not reopened, so that count is unknown. The new source is mysql-2 only until that container restarts: its config file still says `read_only=ON`.
 
-Orchestrator will not run a second automatic failover for one minute (`FailureDetectionPeriodBlockMinutes=1`). The runs below finished, the replicas were started again, and this kill waited that minute out.
+Orchestrator will not run a second automatic failover for one minute (`FailureDetectionPeriodBlockMinutes=1`). If you repeat this experiment soon after another failover, wait that minute out first.
 
 ## Experiment B: a replica dies, and the app is only using the writer
 
@@ -448,7 +452,7 @@ This measurement was taken after experiment A, so the writer was already mysql-2
 
 The extra row stayed. Turning the global back to `false` did not remove it: once ProxySQL has already seen `read_only=0`, it does not revisit that copy. Writes stayed on hostgroup 10 around 700–750 tps, `err/s` 0, while the reads were served by the same server through hostgroup 20.
 
-![mysql-2 online in hostgroup 10 and in hostgroup 20. Rule 1's hit counter is above it.](screenshots/proxysql-writer-also-reader.png)
+![mysql-2 online in hostgroup 10 and in hostgroup 20. Rule 1's hit counter is below it.](screenshots/proxysql-writer-also-reader.png)
 
 The failover hook does not do this insert. The default workload never reads from hostgroup 20, so the hook only has to publish a writer. If you add the `SELECT` rule, also put the current writer into hostgroup 20, or accept that losing every replica fails your reads while your writes continue.
 
@@ -474,6 +478,8 @@ These are the failures hit while building and breaking this lab.
 | A server you just started is `SHUNNED`, and `LOAD` does not clear it immediately. | The monitor saw failed pings (often because `docker kill` removed the DNS name: `Unknown server host`). Recovery can take longer than `shun_recovery_time_sec` (10s here). | Confirm the container is running and replication is `ON`, then `LOAD MYSQL SERVERS TO RUNTIME` on the admin port. |
 | Reads stay at 0 tps after you enabled `mysql-monitor_writer_is_also_reader`. | On 2.7.3 that variable does not copy an already-writable server into the reader hostgroup. | `INSERT` the current writer into hostgroup 20 and `LOAD MYSQL SERVERS TO RUNTIME`, as in experiment C. |
 | `oltp_read_write` never shows traffic on hostgroup 20 after you added the `SELECT` rule. | Those statements run inside `BEGIN`, and the transaction stays on hostgroup 10. | Use a second client with `--skip-trx=on` and `--db-ps-mode=disable`. |
+| `ERROR 1040 (42000): User 'admin' can only connect locally` on port 16032. | ProxySQL accepts the user named `admin` only from inside its own container. | Use `radmin` / `radmin` from your machine, or `docker exec proxysql mysql -h127.0.0.1 -P6032 -uadmin -padmin`. |
+| The failover hook logs `FAILED to fence` or `FAILED to publish`. | A ProxySQL admin statement was rejected. The error is in the same log, `/var/log/proxysql-failover.log` in the orchestrator container. | Fix the cause, then place the servers by hand on the admin port. The `read_only` monitor still moves the new source into hostgroup 10 on its own. |
 | `verify` fails after you have killed mysql-1. | `verify` checks the starting topology, with mysql-1 as the only online writer. | That failure is expected after experiment A. |
 
 ## What is different in production
@@ -481,7 +487,7 @@ These are the failures hit while building and breaking this lab.
 The shape (source, two replicas, a proxy, an external failover manager) is what you would recognise in production. The settings are not.
 
 - **Detection is fast on purpose.** Orchestrator polls every 2 seconds and gives up on a connect after 1 second. ProxySQL pings every second and shuns after two failures. A production Orchestrator poll is often 5–10 seconds, sometimes with several missed checks before a failover. The two-second stall in experiment A is this lab. Your users would wait longer.
-- **Fencing a live old source is unfinished business.** If the source is partitioned and still accepts writes, you can get two writable servers (split brain). The hook tries to mark the old one `OFFLINE_HARD` in hostgroup 30 so ProxySQL will not use it. In the measured runs the hook's admin login was rejected, so the fence never ran; the shun plus the dead process were what kept writes away. The lab's hook now uses a login that works, but no run here has tested the fence against a partition. Do not treat this lab as proof that it holds.
+- **Fencing a live old source is unfinished business.** If the source is partitioned and still accepts writes, you can get two writable servers (split brain). The hook marks the old one `OFFLINE_HARD` in hostgroup 30 so ProxySQL will not use it. In this lab the process was already dead, so the fence had nothing to stop. No run here tested it against a partition. Do not treat this lab as proof that it holds.
 - **The promoted replica forgets that it was promoted when it restarts.** Orchestrator clears `read_only` in memory. The config file still says `read_only=ON` and `super_read_only=ON`. A container restart of the new source comes back read-only, and writes fail until someone turns those variables off or another failover happens.
 - **Async replication can lose committed transactions.** The client was told the commit succeeded before any replica had the change. Semi-sync replication makes the source wait until at least one replica has *received* the transaction before the client gets that answer. It costs latency on every commit, and it does not save you if the one replica that received it is the server that dies with the source. This lab is async so you can see the failure without that wait. The lost-transaction count was not measured.
 - **The old source is not rebuilt for you.** After failover you have mysql-2 writable and mysql-3 copying from it. mysql-1 stays dead until you clone the new source and point mysql-1 at it. Orchestrator will not prefer mysql-1 if it comes back (`must_not`).
