@@ -1,0 +1,60 @@
+{
+  "Debug": true,
+  "EnableSyslog": false,
+  "ListenAddress": ":3000",
+  "MySQLTopologyUser": "orchestrator",
+  "MySQLTopologyPassword": "orchestrator",
+  "MySQLTopologyCredentialsConfigFile": "",
+  "MySQLTopologySSLSkipVerify": true,
+  "MySQLTopologyUseMutualTLS": false,
+  "BackendDB": "sqlite",
+  "SQLite3DataFile": "/var/lib/orchestrator/orchestrator.sqlite3",
+  "MySQLConnectTimeoutSeconds": 1,
+  "DefaultInstancePort": 3306,
+  "DiscoverByShowSlaveHosts": true,
+  "InstancePollSeconds": 2,
+  "UnseenInstanceForgetHours": 24,
+  "SnapshotTopologiesIntervalHours": 0,
+  "HostnameResolveMethod": "none",
+  "MySQLHostnameResolveMethod": "@@report_host",
+  "SkipBinlogServerUnresolveCheck": true,
+  "ReasonableReplicationLagSeconds": 30,
+  "VerifyReplicationFilters": false,
+  "ReplicationLagQuery": "",
+  "DetectClusterAliasQuery": "SELECT @@report_host",
+  "DetectPromotionRuleQuery": "SELECT CASE @@report_host WHEN 'mysql-2' THEN 'prefer' WHEN 'mysql-3' THEN 'neutral' ELSE 'must_not' END",
+  "ReplicationCredentialsQuery": "SELECT 'repl', 'repl', '', '', ''",
+  "FailMasterPromotionOnLagMinutes": 0,
+  "DelayMasterPromotionIfSQLThreadNotUpToDate": true,
+  "FailureDetectionPeriodBlockMinutes": 1,
+  "RecoveryPeriodBlockSeconds": 30,
+  "RecoverMasterClusterFilters": [".*"],
+  "RecoverIntermediateMasterClusterFilters": [".*"],
+  "ApplyMySQLPromotionAfterMasterFailover": true,
+  "UseSuperReadOnly": true,
+  "DetachLostReplicasAfterMasterFailover": true,
+  "MasterFailoverDetachReplicaMasterHost": true,
+  "PreventCrossDataCenterMasterFailover": false,
+  "PreventCrossRegionMasterFailover": false,
+  "ProcessesShellCommand": "bash",
+  "OnFailureDetectionProcesses": [
+    "echo \"$(date -Is) detected {failureType} cluster={failureCluster} failed={failedHost}:{failedPort}\" >> /var/log/proxysql-failover.log"
+  ],
+  "PreFailoverProcesses": [
+    "echo \"$(date -Is) pre-failover {failureType} cluster={failureCluster} failed={failedHost}:{failedPort}\" >> /var/log/proxysql-failover.log"
+  ],
+  "PostMasterFailoverProcesses": [
+    "/usr/local/bin/proxysql-failover-hook.sh \"{failedHost}\" \"{successorHost}\" \"{failureType}\""
+  ],
+  "PostUnsuccessfulFailoverProcesses": [
+    "echo \"$(date -Is) unsuccessful {failureType} cluster={failureCluster} failed={failedHost}:{failedPort}\" >> /var/log/proxysql-failover.log"
+  ],
+  "PostFailoverProcesses": [
+    "echo \"$(date -Is) post-failover {failureType} failed={failedHost} successor={successorHost}:{successorPort}\" >> /var/log/proxysql-failover.log"
+  ],
+  "RaftEnabled": false,
+  "StatusEndpoint": "/api/status",
+  "StatusSimpleHealth": true,
+  "PowerAuthUsers": ["*"],
+  "AuthenticationMethod": ""
+}
