@@ -6,7 +6,7 @@
 
 This is a hands-on lab for people who have used ClickHouse and have not yet watched a replica or a Keeper node die under load. Highly available, in this lab, means the application keeps a single address, and its inserts and selects either keep working or fail in a way it can see. You will build that on your laptop, break it on purpose, and see what the application experiences.
 
-The numbers and command output are from real runs on 29 October 2026. Nothing here is mocked. Clock times are Madeira time (WET, UTC+0). The setup steps were run twice on a Debian 13 host with 8 cores, once as a first run and once as a clean rerun. The four experiments and the lost-data check are from one run on that host, between 21:00 and 21:11. The same commands were then run on a Mac (Apple Silicon, Docker Desktop) between 22:19 and 22:26; [On macOS](#on-macos) explains the memory errors it hit and the fix. The one-command `deploy` and `verify`, and the deduplicated retry at the end of experiment D, are from a third run on the Debian host at 22:38. Two more full runs on the Debian host, at 22:54 and 23:11, give the ranges in [How repeatable are these numbers?](#how-repeatable), the figures, and the batch-by-batch no-loss check. The tooling lives in [`20261029-clickhouse-replicated-ha`](https://github.com/ghkrzysztof-ksiazek/database-labs/tree/master/20261029-clickhouse-replicated-ha).
+The numbers and command output are from real runs between 29 and 31 October 2026; unless a date is given, a time is on 29 October. Nothing here is mocked. Clock times are Madeira time (WET, UTC+0). The setup steps were run twice on a Debian 13 host with 8 cores, once as a first run and once as a clean rerun. The four experiments and the lost-data check are from one run on that host, between 21:00 and 21:11. The same commands were then run on a Mac (Apple Silicon, Docker Desktop) between 22:19 and 22:26; [On macOS](#on-macos) explains the memory errors it hit and the fix. The one-command `deploy` and `verify`, and the deduplicated retry at the end of experiment D, are from a third run on the Debian host at 22:38. Two more full runs on the Debian host, at 22:54 and 23:11, give the Debian ranges in [How repeatable are these numbers?](#how-repeatable), the figures, and the batch-by-batch no-loss check. Two full reruns on the Mac with the fix, on 30 October between 00:06 and 00:15 and on 31 October between 00:03 and 00:12, give the Mac column there; the HAProxy stats page screenshots are from the 31 October run. The tooling lives in [`20261029-clickhouse-replicated-ha`](https://github.com/ghkrzysztof-ksiazek/database-labs/tree/master/20261029-clickhouse-replicated-ha).
 
 The [September lab](https://db-ex.eu/blog/clickhouse-a-replicated-cluster-on-your-laptop-with-kind-and-ansible/) builds a replicated ClickHouse cluster on Kubernetes. This one is smaller on purpose: plain Docker Compose, no Kubernetes, and the whole post is about breaking it. It is the ClickHouse counterpart of [MySQL – high availability for asynchronous replication](https://db-ex.eu/blog/mysql-async-replication-ha/), with the same shape: a proxy, the servers behind it, a coordinator, and a load generator that prints one line per second.
 
@@ -56,7 +56,7 @@ You can build it in one command, or type every step yourself. Both paths end at 
 | --- | --- |
 | Operating system | Linux or macOS. The write-up was produced on Debian 13, and also run on macOS 27 on Apple Silicon. Ubuntu was not tried. |
 | Docker Engine | 29.9.2 with Compose 5.6.1 on the Debian host. Docker Desktop on the Mac (Engine 29.7.2, Compose 5.4.0). Any current Docker Engine with the `docker compose` plugin should work. |
-| Memory | Each ClickHouse server is capped at 4 GB (`max_server_memory_usage`). Under the lab load each used about 1.2 GB on the Debian host and about 2.4–2.5 GB on the Mac, so give Docker at least **6 GB**, or 8 GB on a Mac. [On macOS](#on-macos) explains why the Mac needs more. |
+| Memory | Each ClickHouse server is capped at 4 GB (`max_server_memory_usage`). Under the lab load each used about 1.2 GB on the Debian host and about 2.4–2.5 GB on the Mac in the five-minute load test, with peaks of 2,658 to 2,813 MiB in the two full runs, so give Docker at least **6 GB**, or 8 GB on a Mac. [On macOS](#on-macos) explains why the Mac needs more. |
 | Disk | About 1.8 GB for the three images (ClickHouse server, ClickHouse Keeper, HAProxy), plus a few hundred megabytes of data. |
 | CPU | The Debian host had 8 cores, the Mac 12. Fewer cores were not tried. |
 | Tools | `bash` and `curl`. `sudo` only if the Linux firewall check in step 1 needs it. |
@@ -713,13 +713,17 @@ This version of `verify.sh` checks the seed rows (batch 0) rather than the full 
 
 ## A healthy cluster
 
-With the load generator running, open the HAProxy stats page at <http://127.0.0.1:18404/>. The `ch_native` and `ch_http` backends each list ch-1 and ch-2, both UP, with sessions spread over both. That page is the one to keep open during the experiments. The CSV form of it, which the commands below read, is `http://127.0.0.1:18404/;csv`.
+With the load generator running, open the HAProxy stats page at <http://127.0.0.1:18404/>. The `ch_native` and `ch_http` backends each list ch-1 and ch-2, both UP; in `ch_native` the sessions are spread over both. That page is the one to keep open during the experiments. The CSV form of it, which the commands below read, is `http://127.0.0.1:18404/;csv`.
 
 The load lines are the sample in How to read a load line: 23–28 inserts and selects per second, no errors. On ch-2, `system.replicas` shows `active_replicas` 2 and a `queue_size` that goes up and down by a part or two as ch-2 fetches what the writer sent to ch-1.
 
 [![Terminal: mntr shows keeper-1 leader and keeper-2 and keeper-3 followers; system.clusters lists ch-1 and ch-2 as replicas 1 and 2 of shard 1 in cluster lab; system.replicas on ch-2 shows is_readonly 0, absolute_delay 0, queue_size 0, active_replicas 2 of 2.](screenshots/clickhouse-ha-healthy.png)](screenshots/clickhouse-ha-healthy.png)
 
 The healthy state, from a later run (23:12 WET): one Keeper leader and two followers, two replicas in cluster `lab`, and ch-2 writable with both replicas active.
+
+[![HAProxy statistics page. In the ch_native backend, servers ch-1 and ch-2 are both green, status UP, last check L7OK/200.](screenshots/clickhouse-ha-haproxy-healthy.png)](screenshots/clickhouse-ha-haproxy-healthy.png)
+
+The HAProxy stats page with the lab healthy, from the 31 October run on the Mac (00:04:17). Both servers in `ch_native` are UP.
 
 ## Experiment A: a replica dies
 
@@ -779,6 +783,10 @@ Experiment A in the 23:12 run: inserts and selects per second from the load gene
 [![Terminal: HAProxy view once a second after the kill, ch-1 UP, then UP 1/2, then DOWN, ch-2 UP throughout; system.replicas on ch-2 still shows active_replicas 2 of 2.](screenshots/clickhouse-ha-a-ch1-down.png)](screenshots/clickhouse-ha-a-ch1-down.png)
 
 The HAProxy view and `system.replicas` on ch-2 after the kill in the same run. HAProxy has taken ch-1 out; Keeper still counts it as active.
+
+[![HAProxy statistics page during experiment A. In the ch_native backend, ch-1 is red with status DOWN and last check L4TOUT; ch-2 is green and UP.](screenshots/clickhouse-ha-haproxy-a-ch1-down.png)](screenshots/clickhouse-ha-haproxy-a-ch1-down.png)
+
+The same stats page in experiment A of the 31 October Mac run, five seconds after ch-1 was killed (00:04:22): ch-1 DOWN after a layer 4 timeout, ch-2 UP.
 
 About 8 seconds after the kill, ch-2 still counted two active replicas:
 
@@ -852,15 +860,15 @@ keeper-1=leader keeper-2=follower keeper-3=follower
 
 keeper-2 was the leader within a second. Inserts dropped to 8 in the kill second and to 0 for the next two seconds, with no errors, and were back to the earlier rate at 21:02:35. Selects ran at 19–24 per second throughout.
 
-**The stall was not always that short.** The same experiment was run three more times: on the Mac in the 22:19 run, and twice more on the Debian host, at 22:56 and 23:13. Each time a new leader was elected within about 2 seconds, and each time inserts stopped for 11–12 seconds, again with no errors and no effect on selects. The 23:13 run:
+**The stall was not always that short.** The same experiment was run five more times: on the Mac in the 22:19 run, twice more on the Debian host, at 22:56 and 23:13, and twice on the Mac with the fixed settings, on 30 October at 00:08 and on 31 October at 00:05. In four of them, a new leader was elected within about 2 seconds and inserts stopped for 11–12 seconds, again with no errors and no effect on selects. In the 30 October run, the new leader was there 1.1 seconds after the kill and inserts stopped for 1 second, also with no errors. The 23:13 run:
 
 [![Chart of inserts and selects per second around the kill of the Keeper leader. Inserts drop to zero for twelve seconds and then recover; selects stay at about 20 to 25 per second throughout. There are no error markers.](screenshots/clickhouse-ha-b-timeline.png)](screenshots/clickhouse-ha-b-timeline.png)
 
 Experiment B in the 23:13 run: the Keeper leader is killed at 0; inserts stop for 12 seconds with no errors, selects carry on.
 
-Before that run, both replicas' Keeper sessions were on keeper-2, which survived (`SELECT host FROM system.zookeeper_connection` on each replica). A likely explanation, not confirmed: a follower passes writes on to the leader, and when the leader dies, requests already in flight wait for the 10 second `operation_timeout_ms` before the replica gives up on them and reconnects. Election (about 2 s) plus that timeout (10 s) is the 12 seconds seen. In the first run, where the stall was 2–3 seconds, the session placement was not recorded. If the sessions were on the killed leader, the connections would have been reset at once, which would explain the shorter stall.
+Before that run, both replicas' Keeper sessions were on keeper-2, which survived (`SELECT host FROM system.zookeeper_connection` on each replica). A likely explanation, not confirmed: a follower passes writes on to the leader, and when the leader dies, requests already in flight wait for the 10 second `operation_timeout_ms` before the replica gives up on them and reconnects. Election (about 2 s) plus that timeout (10 s) is the 12 seconds seen. In the first run, where the stall was 2–3 seconds, the session placement was not recorded. If the sessions were on the killed leader, the connections would have been reset at once, which would explain the shorter stall. The 31 October Mac run fits it: both sessions were on keeper-1, which kept running when keeper-2 was killed (it missed one `mntr` check during the election), and inserts stopped for 12 seconds. The 30 October Mac run does not: its sessions were on keeper-2 and keeper-1, both of which survived the kill of keeper-3, and inserts still stopped for only 1 second. So the explanation stays unconfirmed.
 
-**What this means for your application.** Losing the Keeper leader is a stall for inserts of 2–3 seconds at best and about 12 seconds in three runs of four, with no errors, and nothing for selects. Most applications would see it as a spike in insert latency. A client timeout shorter than about 15 seconds would turn it into errors. Keeper now has two of three nodes: it still has a majority, and it cannot lose another node. The next experiment takes that one.
+**What this means for your application.** Losing the Keeper leader is a stall for inserts of 1–3 seconds at best and about 12 seconds in four runs of six, with no errors, and nothing for selects. Most applications would see it as a spike in insert latency. A client timeout shorter than about 15 seconds would turn it into errors. Keeper now has two of three nodes: it still has a majority, and it cannot lose another node. The next experiment takes that one.
 
 ## Experiment C: Keeper loses quorum
 
@@ -913,7 +921,7 @@ Code: 242. DB::Exception: Received from haproxy:9000. DB::Exception: Table is in
 replica_path=/clickhouse/tables/01/lab/events/replicas/ch-2. (TABLE_IS_READ_ONLY)
 ```
 
-This was the most repeatable number in the lab. In the Mac run and in two more runs on the Debian host, the first insert error came 142–143 seconds after the kill, and the next one 142–143 seconds after that. The 23:13 run:
+This was the most repeatable number in the lab. In all three Mac runs and in two more runs on the Debian host, the first insert error came 142–143 seconds after the kill, and the next one 142–143 seconds after that. The 23:13 run:
 
 [![Chart of inserts and selects per second over five minutes after the second Keeper is killed. Inserts are at zero the whole time, with an error marker at about 142 seconds and another at about 285 seconds. Selects stay at about 20 to 25 per second. Inserts recover about ten seconds after keeper-2 is started.](screenshots/clickhouse-ha-c-timeline.png)](screenshots/clickhouse-ha-c-timeline.png)
 
@@ -922,6 +930,10 @@ Experiment C in the 23:13 run: no insert finishes for almost five minutes, two i
 [![Terminal: forty seconds after the kill both replicas show is_readonly 1, is_session_expired 1, active_replicas 0; the replicas_status check still answers Ok. with HTTP 200; HAProxy shows ch-1 and ch-2 UP.](screenshots/clickhouse-ha-c-readonly.png)](screenshots/clickhouse-ha-c-readonly.png)
 
 Forty seconds after the second Keeper died, in the same run: both tables read-only, the health check still `Ok.`, HAProxy still sending traffic to both.
+
+[![HAProxy statistics page during experiment C. In the ch_native backend, ch-1 and ch-2 are both green, status UP, last check L7OK/200.](screenshots/clickhouse-ha-haproxy-c-readonly.png)](screenshots/clickhouse-ha-haproxy-c-readonly.png)
+
+The stats page in experiment C of the 31 October Mac run, 41 seconds after the second Keeper was killed (00:06:10). Both replicas were read-only at that point (`system.replicas`), and HAProxy still shows both UP.
 
 **Why it waits.** An insert into a replicated table that cannot reach Keeper does not give up at once. It retries:
 
@@ -1120,28 +1132,28 @@ That is through two kills of a replica, the loss of the Keeper leader, and two a
 
 ## How repeatable are these numbers?
 
-The whole sequence, from `deploy` through experiments A to D to the no-loss check and `teardown`, ran four times: three times on the Debian host (21:00, 22:54 and 23:11) and once on the Mac (22:19). The later two Debian runs used `tools/run-experiments.sh`, which runs the same commands as this post and keeps every output. The ranges:
+The whole sequence, from `deploy` through experiments A to D to the no-loss check and `teardown`, ran six times: three times on the Debian host (21:00, 22:54 and 23:11) and three times on the Mac, at 22:19 with the first memory settings and on 30 October at 00:06 and 31 October at 00:03 with the fixed ones. The later two Debian runs and the last two Mac runs used `tools/run-experiments.sh`, which runs the same commands as this post and keeps every output. The Mac column is the two runs with the fixed settings. The ranges:
 
 |  |  |  |
 | --- | --- | --- |
-| What | Debian, 3 runs | Mac, 1 run |
-| A: seconds with no insert after the replica kill | 2–3 s | 3 s |
-| A: failed inserts / selects | 1–2 / 2 | 2 / not usable (memory errors) |
-| A: HAProxy marks ch-1 DOWN | 2–3.8 s | 3 s |
-| B: new Keeper leader | under 1 s to 2.2 s | under 1 s |
-| B: insert stall, no errors | 2–3 s once, 11–12 s twice | 12 s |
-| C: first insert error after the kill, then the next | 142–143 s, then 142–143 s | 143 s |
+| What | Debian, 3 runs | Mac, fixed settings, 2 runs |
+| A: seconds with no insert after the replica kill | 2–3 s | 0–3 s |
+| A: failed inserts / selects | 1–2 / 2 | 1–2 / 1–2 |
+| A: HAProxy marks ch-1 DOWN | 2–3.8 s | 2.5–3.9 s |
+| B: new Keeper leader | under 1 s to 2.2 s | 1.1–2.1 s |
+| B: insert stall, no errors | 2–3 s once, 11–12 s twice | 1 s once, 12 s once |
+| C: first insert error after the kill, then the next | 142–143 s, then 142–143 s | 142–143 s, then 143 s |
 | C: select errors while read-only | 0 | 0 |
 | C: HAProxy while read-only | both UP, HTTP 200 | both UP, HTTP 200 |
-| C: with `insert_keeper_max_retries = 0` | 0.075–0.096 s | 0.053 s |
-| C: writable after quorum is back | 4–12 s | 8–10 s |
-| D: quorum insert, healthy | 0.084–0.107 s | 0.096 s |
-| D: one second after the ch-2 kill | 5.094–5.100 s, unknown status | 5.103 s, unknown status |
-| D: after the session expired | 0.081–0.147 s, too few replicas | 0.066 s, too few replicas |
-| D: retry of the identical block | 0.085–0.092 s, 10 rows on each replica | not run |
-| Acknowledged batches missing | 0 (counts in the first run, batch lists in the other two) | 0 on ch-2 by count; ch-1 not checked |
+| C: with `insert_keeper_max_retries = 0` | 0.075–0.096 s | 0.055–0.059 s |
+| C: writable after quorum is back | 4–12 s | 1–10 s |
+| D: quorum insert, healthy | 0.084–0.107 s | 0.080–0.098 s |
+| D: one second after the ch-2 kill | 5.094–5.100 s, unknown status | 5.087–5.094 s, unknown status |
+| D: after the session expired | 0.081–0.147 s, too few replicas | 0.064–0.066 s, too few replicas |
+| D: retry of the identical block | 0.085–0.092 s, 10 rows on each replica | 0.071–0.072 s, 10 rows on each replica |
+| Acknowledged batches missing | 0 (counts in the first run, batch lists in the other two) | 0 (7,134 and 6,416 batches, by batch list on both replicas) |
 
-Experiment C and the quorum timings in D are fixed by settings, and they did not move. Experiment A moved by about a second, which is the one-second health check. Experiment B is the one to treat with care; see the notes under it.
+Experiment C and the quorum timings in D are fixed by settings, and they did not move. Experiment A moved by about a second on the Debian host, which is the one-second health check, and by more on the Mac (0–3 seconds with no insert). Experiment B is the one to treat with care; see the notes under it.
 
 ## On macOS
 
@@ -1176,6 +1188,8 @@ ClickHouse 25.8 refuses new allocations when the resident memory of the whole pr
 ch-2 resident memory under the lab load, five minutes from the start of the load. The dotted line is the old 1.5 GB cap. Mac lines from two 5-minute load tests at 22:55 and 23:23; Debian lines from the full runs at 22:54 and 23:11.
 
 **The fix.** Both settings are in `cluster.xml` (step 4): old parts removed after 10 seconds, and a cap of 4 GB. In a five-minute load test on the Mac at 23:23 with these settings, resident memory levelled off at 2.4–2.5 GB, and 5,482 reader queries on ch-2 ran with no `MEMORY_LIMIT_EXCEEDED`. Both are lab settings. In production the cap comes from the size of the machine (`max_server_memory_usage_to_ram_ratio`), and inserts come in batches far larger than 1,000 rows, so there are far fewer parts.
+
+**The full run with the fix.** The whole sequence, deploy through experiments A to D, the no-loss check and teardown, ran on the Mac with these settings on 30 October between 00:06:31 and 00:15:00. Neither the reader nor the writer got a `MEMORY_LIMIT_EXCEEDED`. Both replicas ended with 8,134,030 rows, and all 7,134 acknowledged loader batches were on both. Resident memory peaked at 2,813 MiB on ch-1 and 2,695 MiB on ch-2, under the 4 GB cap, with at most 781 and 831 outdated parts. A second full run on 31 October, between 00:03:39 and 00:12:16, was the same: no `MEMORY_LIMIT_EXCEEDED`, 7,416,030 rows and all 6,416 acknowledged batches on both replicas, peaks of 2,706 and 2,658 MiB, and at most 816 and 760 outdated parts. The two runs are the Mac column in [How repeatable are these numbers?](#how-repeatable).
 
 The other changes the Mac needed are already in the commands above: skip the `iptables` lines in step 1, wait before the HAProxy check in step 8, wait for ch-1 to accept queries in experiment A, and run a real `sleep 40` in experiment C.
 
