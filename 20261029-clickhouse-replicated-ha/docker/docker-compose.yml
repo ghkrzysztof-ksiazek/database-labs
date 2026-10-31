@@ -1,0 +1,86 @@
+name: ch-ha
+
+x-keeper: &keeper
+  image: clickhouse/clickhouse-keeper:25.8
+  networks: [ch-ha]
+
+x-clickhouse: &clickhouse
+  image: clickhouse/clickhouse-server:25.8
+  networks: [ch-ha]
+  environment:
+    CLICKHOUSE_PASSWORD: chpass
+    CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+  ulimits:
+    nofile: { soft: 262144, hard: 262144 }
+  depends_on: [keeper-1, keeper-2, keeper-3]
+
+services:
+  keeper-1:
+    <<: *keeper
+    container_name: keeper-1
+    hostname: keeper-1
+    volumes:
+      - ./keeper/keeper-1.xml:/etc/clickhouse-keeper/keeper_config.d/keeper.xml:ro
+      - keeper-1:/var/lib/clickhouse-keeper
+    ports: ["127.0.0.1:19181:9181"]
+  keeper-2:
+    <<: *keeper
+    container_name: keeper-2
+    hostname: keeper-2
+    volumes:
+      - ./keeper/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.d/keeper.xml:ro
+      - keeper-2:/var/lib/clickhouse-keeper
+    ports: ["127.0.0.1:19182:9181"]
+  keeper-3:
+    <<: *keeper
+    container_name: keeper-3
+    hostname: keeper-3
+    volumes:
+      - ./keeper/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.d/keeper.xml:ro
+      - keeper-3:/var/lib/clickhouse-keeper
+    ports: ["127.0.0.1:19183:9181"]
+
+  ch-1:
+    <<: *clickhouse
+    container_name: ch-1
+    hostname: ch-1
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros/ch-1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.d/app.xml:/etc/clickhouse-server/users.d/app.xml:ro
+      - ch-1:/var/lib/clickhouse
+    ports: ["127.0.0.1:18124:8123", "127.0.0.1:19001:9000"]
+  ch-2:
+    <<: *clickhouse
+    container_name: ch-2
+    hostname: ch-2
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros/ch-2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.d/app.xml:/etc/clickhouse-server/users.d/app.xml:ro
+      - ch-2:/var/lib/clickhouse
+    ports: ["127.0.0.1:18125:8123", "127.0.0.1:19002:9000"]
+
+  haproxy:
+    image: haproxy:3.2
+    container_name: haproxy
+    hostname: haproxy
+    networks: [ch-ha]
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:18404:8404"
+    depends_on: [ch-1, ch-2]
+
+networks:
+  ch-ha:
+    name: ch-ha
+
+volumes:
+  keeper-1:
+  keeper-2:
+  keeper-3:
+  ch-1:
+  ch-2:

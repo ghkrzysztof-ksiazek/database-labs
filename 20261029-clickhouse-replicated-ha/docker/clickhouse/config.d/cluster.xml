@@ -1,0 +1,41 @@
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>true</console>
+    </logger>
+    <listen_host>0.0.0.0</listen_host>
+
+    <!-- Lab-sized memory. "On macOS" in the post explains both settings. -->
+    <merge_tree>
+        <!-- drop merged-away parts after 10 s instead of 480 s -->
+        <old_parts_lifetime>10</old_parts_lifetime>
+        <cleanup_delay_period>1</cleanup_delay_period>
+        <max_cleanup_delay_period>2</max_cleanup_delay_period>
+    </merge_tree>
+    <max_server_memory_usage>4000000000</max_server_memory_usage>
+    <mark_cache_size>268435456</mark_cache_size>
+
+    <!-- the Keeper ensemble every replica talks to -->
+    <zookeeper>
+        <node><host>keeper-1</host><port>9181</port></node>
+        <node><host>keeper-2</host><port>9181</port></node>
+        <node><host>keeper-3</host><port>9181</port></node>
+        <session_timeout_ms>30000</session_timeout_ms>
+        <operation_timeout_ms>10000</operation_timeout_ms>
+    </zookeeper>
+
+    <!-- one shard, two replicas -->
+    <remote_servers replace="true">
+        <lab>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica><host>ch-1</host><port>9000</port><user>default</user><password>chpass</password></replica>
+                <replica><host>ch-2</host><port>9000</port><user>default</user><password>chpass</password></replica>
+            </shard>
+        </lab>
+    </remote_servers>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+</clickhouse>
