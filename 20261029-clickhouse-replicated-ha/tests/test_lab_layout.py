@@ -56,15 +56,18 @@ class LabLayoutTests(unittest.TestCase):
         self.assertIn("ON CLUSTER lab", schema)
         self.assertIn("ReplicatedMergeTree('/clickhouse/tables/{shard}/lab/events', '{replica}')", schema)
 
-    def test_writeup_teaches_the_ideas_before_the_experiments(self) -> None:
+    def test_readme_is_a_short_lab_readme(self) -> None:
         readme = (ROOT / "README.md").read_text()
-        for heading in (
-            "What you will build", "What you will learn", "Before you start",
-            "Ideas you need first", "When something goes wrong",
-            "What is different in production", "Glossary", "Clean up",
-        ):
+        for heading in ("## Prerequisites", "## Layout", "## Quick start", "## Files"):
             self.assertIn(heading, readme, heading)
-        self.assertLess(readme.index("Ideas you need first"), readme.index("Experiment A"))
+        for command in (
+            "./scripts/lab.sh deploy", "./scripts/lab.sh verify", "./scripts/lab.sh teardown",
+            "./tools/run-experiments.sh <label>", "./tools/memdiag.sh", "./tools/memiso.sh",
+        ):
+            self.assertIn(command, readme, command)
+        self.assertIn("https://db-ex.eu/blog/", readme)
+        self.assertNotIn("linux", readme.lower())
+        self.assertLess(len(readme.splitlines()), 150)
         manual = (ROOT / "docs" / "manual-setup.md").read_text()
         self.assertIn("What you should see", manual)
         self.assertIn("How to check", manual)
