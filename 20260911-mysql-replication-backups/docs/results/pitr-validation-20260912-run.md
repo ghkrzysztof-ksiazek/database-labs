@@ -1,4 +1,4 @@
-# Backup, restore and PITR test run `pitr-codex-20260912`
+# Backup, restore and PITR test run `pitr-validation-20260912`
 
 Generated from the recorded JSONL evidence by `./scripts/lab.sh report` (also called by the full suite). Rows represent attempts; repeated scenario IDs are retries, and absent scenarios were not recorded.
 
