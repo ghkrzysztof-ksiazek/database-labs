@@ -1,0 +1,13 @@
+{
+  "_comment": "SIMULATED fleet for the blog post, not a real account. Same shape as aws rds describe-db-instances --output json, trimmed to the fields es_cost.py reads. For Aurora the Extended Support flag really lives on the cluster; here the analytics cluster's opt-out is copied onto its instance.",
+  "DBInstances": [
+    {"DBInstanceIdentifier": "shop-orders",           "Engine": "mysql",        "EngineVersion": "8.0.42",                  "DBInstanceClass": "db.r6g.xlarge", "MultiAZ": true,  "EngineLifecycleSupport": "open-source-rds-extended-support"},
+    {"DBInstanceIdentifier": "shop-orders-rr1"      , "Engine": "mysql",        "EngineVersion": "8.0.42",                  "DBInstanceClass": "db.r6g.large",  "MultiAZ": false, "EngineLifecycleSupport": "open-source-rds-extended-support"},
+    {"DBInstanceIdentifier": "shop-catalog",          "Engine": "mysql",        "EngineVersion": "8.0.42",                  "DBInstanceClass": "db.m6g.large",  "MultiAZ": false, "EngineLifecycleSupport": "open-source-rds-extended-support"},
+    {"DBInstanceIdentifier": "internal-tools",        "Engine": "mysql",        "EngineVersion": "8.0.42",                  "DBInstanceClass": "db.t4g.medium", "MultiAZ": false, "EngineLifecycleSupport": "open-source-rds-extended-support"},
+    {"DBInstanceIdentifier": "pay-writer",       "Engine": "aurora-mysql", "EngineVersion": "8.0.mysql_aurora.3.10.1", "DBInstanceClass": "db.r6g.xlarge", "EngineLifecycleSupport": "open-source-rds-extended-support"},
+    {"DBInstanceIdentifier": "pay-reader-1"     ,     "Engine": "aurora-mysql", "EngineVersion": "8.0.mysql_aurora.3.10.1", "DBInstanceClass": "db.r6g.xlarge", "EngineLifecycleSupport": "open-source-rds-extended-support"},
+    {"DBInstanceIdentifier": "analytics-writer",      "Engine": "aurora-mysql", "EngineVersion": "8.0.mysql_aurora.3.10.1", "DBInstanceClass": "db.r6g.large",  "EngineLifecycleSupport": "open-source-rds-extended-support-disabled"},
+    {"DBInstanceIdentifier": "billing-pg",            "Engine": "postgres",     "EngineVersion": "16.6",                    "DBInstanceClass": "db.m6g.large",  "MultiAZ": true,  "EngineLifecycleSupport": "open-source-rds-extended-support"}
+  ]
+}

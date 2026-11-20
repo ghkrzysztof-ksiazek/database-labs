@@ -1,0 +1,10 @@
+test_blog_example_year_3 (test_es_cost.Arithmetic.test_blog_example_year_3) ... ok
+test_blog_example_years_1_2 (test_es_cost.Arithmetic.test_blog_example_years_1_2) ... ok
+test_split_at_year_3 (test_es_cost.Arithmetic.test_split_at_year_3) ... ok
+test_standard_support_costs_nothing (test_es_cost.Arithmetic.test_standard_support_costs_nothing) ... ok
+test_stops_at_end_of_extended_support (test_es_cost.Arithmetic.test_stops_at_end_of_extended_support) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+OK

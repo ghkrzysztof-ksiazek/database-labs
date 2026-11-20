@@ -1,0 +1,13 @@
+Window 2026-11-26 to 2027-11-26 (365 days), rates 0.210 / 0.419 USD per vCPU-hour
+
+instance         version                   class           vCPU  status on 2026-11-26               USD
+shop-orders      RDS for MySQL 8.0 (M-AZ)  db.r6g.xlarge      8  ES, year 1-2 rate            14,716.80
+shop-orders-rr1  RDS for MySQL 8.0         db.r6g.large       2  ES, year 1-2 rate             3,679.20
+shop-catalog     RDS for MySQL 8.0         db.m6g.large       2  ES, year 1-2 rate             3,679.20
+internal-tools   RDS for MySQL 8.0         db.t4g.medium      2  ES, year 1-2 rate             3,679.20
+pay-writer       Aurora MySQL v3           db.r6g.xlarge      4  standard to 2028-04-30            0.00
+pay-reader-1     Aurora MySQL v3           db.r6g.xlarge      4  standard to 2028-04-30            0.00
+analytics-writer Aurora MySQL v3           db.r6g.large       2  not enrolled                      0.00
+
+total                                                                                         25,754.40
+NOTE billing-pg: engine postgres is not covered

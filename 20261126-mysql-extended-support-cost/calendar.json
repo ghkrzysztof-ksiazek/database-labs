@@ -1,0 +1,18 @@
+{
+  "_note": "Dates copied by hand from the AWS pages below on 19 Nov 2026. Charges start on year1 (inclusive). year3 is when the higher rate starts. es_end is the last day of Extended Support. null means AWS has not published the date.",
+  "_sources": [
+    "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.Concepts.VersionMgmt.html",
+    "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraMySQLReleaseNotes/AuroraMySQL.release-calendars.html",
+    "https://aws.amazon.com/about-aws/whats-new/2026/06/rds-mysql-es-extension/"
+  ],
+  "mysql": {
+    "5.7": {"label": "RDS for MySQL 5.7", "std_end": "2024-02-29", "year1": "2024-03-01", "year3": "2026-03-01", "es_end": "2029-06-30"},
+    "8.0": {"label": "RDS for MySQL 8.0", "std_end": "2026-07-31", "year1": "2026-08-01", "year3": "2028-08-01", "es_end": "2029-07-31"},
+    "8.4": {"label": "RDS for MySQL 8.4", "std_end": "2029-07-31", "year1": "2029-08-01", "year3": "2031-08-01", "es_end": "2032-07-31"}
+  },
+  "aurora-mysql": {
+    "5.7": {"label": "Aurora MySQL v2", "std_end": "2024-10-31", "year1": "2024-12-01", "year3": "2026-12-01", "es_end": "2029-06-30"},
+    "8.0": {"label": "Aurora MySQL v3", "std_end": "2028-04-30", "year1": "2028-05-01", "year3": null, "es_end": "2029-07-31"},
+    "8.4": {"label": "Aurora MySQL 8.4", "std_end": null, "std_end_text": "April 2032", "year1": null, "year3": null, "es_end": null}
+  }
+}

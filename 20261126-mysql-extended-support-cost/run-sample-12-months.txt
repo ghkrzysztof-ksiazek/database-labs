@@ -1,0 +1,12 @@
+Window 2026-11-26 to 2027-11-26 (365 days), rates 0.100 / 0.200 USD per vCPU-hour
+
+instance         version                   class           vCPU  status on 2026-11-26               USD
+legacy-writer    Aurora MySQL v2           db.r6g.2xlarge     8  ES, year 3 from 2026-12-01   13,920.00
+legacy-reader-1  Aurora MySQL v2           db.r6g.2xlarge     8  ES, year 3 from 2026-12-01   13,920.00
+legacy-reader-2  Aurora MySQL v2           db.r6g.2xlarge     8  ES, year 3 from 2026-12-01   13,920.00
+orders           RDS for MySQL 8.0 (M-AZ)  db.r6g.xlarge      8  ES, year 1-2 rate             7,008.00
+app-writer       Aurora MySQL v3           db.r7g.large       2  standard to 2028-04-30            0.00
+reports          RDS for MySQL 8.4         db.t4g.medium      2  standard to 2029-07-31            0.00
+
+total                                                                                         48,768.00
+NOTE events: Aurora Serverless is billed per ACU-hour, not covered
